@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Categories on 오늘의 부동산</title>
+    <link>http://localhost:1313/categories/</link>
+    <description>Recent content in Categories on 오늘의 부동산</description>
+    <generator>Hugo</generator>
+    <language>ko-kr</language>
+    <lastBuildDate>Fri, 28 Aug 2026 09:00:00 +0900</lastBuildDate>
+    <atom:link href="http://localhost:1313/categories/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>부동산 상식</title>
+      <link>http://localhost:1313/categories/%EB%B6%80%EB%8F%99%EC%82%B0-%EC%83%81%EC%8B%9D/</link>
+      <pubDate>Fri, 28 Aug 2026 09:00:00 +0900</pubDate>
+      <guid>http://localhost:1313/categories/%EB%B6%80%EB%8F%99%EC%82%B0-%EC%83%81%EC%8B%9D/</guid>
+      <description></description>
+    </item>
+  </channel>
+</rss>

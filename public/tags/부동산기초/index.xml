@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>부동산기초 on 오늘의 부동산</title>
+    <link>http://localhost:1313/tags/%EB%B6%80%EB%8F%99%EC%82%B0%EA%B8%B0%EC%B4%88/</link>
+    <description>Recent content in 부동산기초 on 오늘의 부동산</description>
+    <generator>Hugo</generator>
+    <language>ko-kr</language>
+    <lastBuildDate>Fri, 28 Aug 2026 09:00:00 +0900</lastBuildDate>
+    <atom:link href="http://localhost:1313/tags/%EB%B6%80%EB%8F%99%EC%82%B0%EA%B8%B0%EC%B4%88/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>부동산이란?</title>
+      <link>http://localhost:1313/posts/what-is-real-estate/</link>
+      <pubDate>Fri, 28 Aug 2026 09:00:00 +0900</pubDate>
+      <guid>http://localhost:1313/posts/what-is-real-estate/</guid>
+      <description>&lt;h1 id=&#34;부동산不動産이란-무엇일까요&#34;&gt;부동산(不動産)이란 무엇일까요?&lt;/h1&gt;
+&lt;p&gt;부동산이란 말 그대로 **&amp;lsquo;움직여 옮길 수 없는 재산&amp;rsquo;**을 의미합니다.
+법률적으로는 &lt;strong&gt;토지와 그 위에 단단히 붙어 있는 건물, 수목 등&lt;/strong&gt;을 말합니다.&lt;/p&gt;
+&lt;hr&gt;
+&lt;h3 id=&#34;-대표적인-부동산의-종류&#34;&gt;🏢 대표적인 부동산의 종류&lt;/h3&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;토지&lt;/strong&gt;: 건물을 지을 수 있는 대지, 농지, 임야 등&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;주거용 부동산&lt;/strong&gt;: 아파트, 단독주택, 다세대/빌라, 오피스텔&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;상업용 부동산&lt;/strong&gt;: 상가, 대형 빌딩, 지식산업센터&lt;/li&gt;
+&lt;/ol&gt;
+&lt;hr&gt;
+&lt;p&gt;앞으로 &lt;strong&gt;&amp;lsquo;오늘의 부동산&amp;rsquo;&lt;/strong&gt; 블로그에서 매일 아침 전해드리는 최신 뉴스와 알기 쉬운 분석을 통해 부동산 시장 흐름을 한눈에 확인해 보세요!&lt;/p&gt;</description>
+    </item>
+  </channel>
+</rss>
