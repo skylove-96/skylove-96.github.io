@@ -1,0 +1,32 @@
+{
+  "apartment": {
+    "title": "파이썬을 활용한 부동산 시장 분석_아파트편",
+    "data_year": 2026,
+    "keywords": ["아파트"],
+    "links": {
+      "교보문고": "https://ebook-product.kyobobook.co.kr/dig/epd/ebook/480D250151380",
+      "밀리의서재": "",
+      "yes24": ""
+    }
+  },
+  "villa": {
+    "title": "파이썬을 활용한 부동산 시장 분석_연립다세대편",
+    "data_year": 2026,
+    "keywords": ["연립", "다세대", "빌라"],
+    "links": {
+      "교보문고": "",
+      "밀리의서재": "",
+      "yes24": ""
+    }
+  },
+  "officetel": {
+    "title": "파이썬을 활용한 부동산 시장 분석_오피스텔편",
+    "data_year": 2026,
+    "keywords": ["오피스텔"],
+    "links": {
+      "교보문고": "",
+      "밀리의서재": "",
+      "yes24": ""
+    }
+  }
+}
