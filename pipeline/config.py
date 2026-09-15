@@ -86,3 +86,7 @@ NUM_ROWS_PER_DISTRICT = 1000
 PROMO_PROBABILITY = 0.7
 
 CATEGORY_LABEL = "데이터분석"
+
+# 애드센스 등 콘텐츠 품질 기준을 위한 발행 전 체크 값.
+MIN_TRANSACTIONS = 10  # 이보다 거래건수가 적으면 그 주제는 건너뛰고 다른 후보로 대체
+MIN_BODY_CHARS = 800  # 본문(마크다운 body) 글자수가 이보다 적으면 발행 후보에서 제외

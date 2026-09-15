@@ -1,0 +1,126 @@
+name: 데이터 기반 블로그 글 자동 생성 (PR)
+
+# 매일 한국시간(KST, UTC+9) 오전 8시 = UTC 23:00(전날) 실행.
+on:
+  schedule:
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "분석할 월 (YYYYMM). 비워두면 지난달을 자동으로 사용"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 한글 폰트 설치 (차트용)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y fonts-nanum
+
+      - name: 파이썬 의존성 설치
+        run: pip install -r pipeline/requirements.txt
+
+      - name: 콘텐츠 생성
+        id: generate
+        env:
+          DATA_GO_KR_ENCODING_KEY: ${{ secrets.DATA_GO_KR_ENCODING_KEY }}
+          DATA_GO_KR_DECODING_KEY: ${{ secrets.DATA_GO_KR_DECODING_KEY }}
+          MONTH_INPUT: ${{ github.event.inputs.month }}
+        run: |
+          if [ -n "$MONTH_INPUT" ]; then
+            python pipeline/generate_post.py --month "$MONTH_INPUT" | tee generate_output.log
+          else
+            python pipeline/generate_post.py | tee generate_output.log
+          fi
+          # 위 파이프라인이 실패(exit != 0)하면 여기서 스텝 자체가 실패로 기록되고,
+          # 이후 브랜치 생성/PR 스텝은 전부 건너뛰어진다 (오류 로그만 남고 PR은 생성되지 않음).
+
+      - name: 생성 결과 파싱
+        id: meta
+        run: |
+          if grep -q '^::post-meta::' generate_output.log; then
+            META_JSON="$(grep '^::post-meta::' generate_output.log | sed 's/^::post-meta:://')"
+            {
+              echo "found=true"
+              echo "title=$(echo "$META_JSON" | jq -r .title)"
+              echo "summary=$(echo "$META_JSON" | jq -r .summary)"
+              echo "slug=$(echo "$META_JSON" | jq -r .slug)"
+              echo "path=$(echo "$META_JSON" | jq -r .path)"
+              echo "data_period=$(echo "$META_JSON" | jq -r .data_period)"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "오늘은 발행할 만한 주제가 없어 PR을 생성하지 않습니다 (아래 로그 참고)."
+          fi
+
+      - name: 브랜치 생성 및 커밋
+        if: steps.meta.outputs.found == 'true'
+        id: branch
+        env:
+          SLUG: ${{ steps.meta.outputs.slug }}
+          POST_PATH: ${{ steps.meta.outputs.path }}
+          TITLE: ${{ steps.meta.outputs.title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          KST_DATE="$(date -u -d '+9 hours' +%F)"
+          BRANCH="post/${KST_DATE}-${SLUG}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git checkout -b "$BRANCH"
+          git add "$POST_PATH"
+          git commit -m "글 자동 생성: $TITLE"
+          git push origin "$BRANCH"
+
+      - name: PR 본문 작성
+        if: steps.meta.outputs.found == 'true'
+        env:
+          TITLE: ${{ steps.meta.outputs.title }}
+          SUMMARY: ${{ steps.meta.outputs.summary }}
+          DATA_PERIOD: ${{ steps.meta.outputs.data_period }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "## 자동 생성된 글 (발행 전 검수 필요)"
+            echo
+            echo "- **제목**: $TITLE"
+            echo "- **요약**: $SUMMARY"
+            echo "- **사용한 데이터 기간**: $DATA_PERIOD"
+            echo "- **생성 실행**: $RUN_URL"
+            echo
+            echo "공공데이터포털 국토교통부 실거래가 API 데이터를 파이썬으로 분석해 자동 생성했습니다."
+            echo "아래를 확인한 뒤 병합해주세요. 병합되면 main 브랜치 배포 워크플로가 자동으로 GitHub Pages에 배포합니다."
+            echo
+            echo "### 체크리스트"
+            echo "- [ ] 수치/표 내용이 실제와 맞는지 확인"
+            echo "- [ ] 차트 이미지가 깨지지 않고 잘 보이는지 확인"
+            echo "- [ ] 문장이 어색하거나 과장된 표현이 없는지 확인"
+            echo "- [ ] 전자책 홍보 문구가 있다면 자연스러운지 확인"
+          } > pr_body.md
+
+      - name: PR 생성
+        if: steps.meta.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.meta.outputs.title }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          gh pr create \
+            --title "$TITLE" \
+            --body-file pr_body.md \
+            --base main \
+            --head "$BRANCH"

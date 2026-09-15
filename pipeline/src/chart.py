@@ -4,13 +4,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import pandas as pd
 
 matplotlib.use("Agg")
 
-# Windows 기본 한글 폰트. 다른 OS라면 설치된 한글 폰트 이름으로 바꿔주세요.
-plt.rcParams["font.family"] = "Malgun Gothic"
+# Windows에는 맑은 고딕, GitHub Actions(Ubuntu, fonts-nanum 설치 후)에는 나눔고딕이 있다.
+# 설치된 폰트 중 먼저 발견되는 걸 쓰고, 하나도 없으면 기본 폰트로 두어(글자는 깨지지만) 빌드 자체는 실패하지 않게 한다.
+_KOREAN_FONT_CANDIDATES = ["Malgun Gothic", "NanumGothic", "AppleGothic", "Noto Sans CJK KR"]
+_available_fonts = {f.name for f in fm.fontManager.ttflist}
+for _name in _KOREAN_FONT_CANDIDATES:
+    if _name in _available_fonts:
+        plt.rcParams["font.family"] = _name
+        break
+
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -18,23 +26,26 @@ def district_bar_chart(
     district_summary: pd.DataFrame,
     out_path: Path,
     title: str,
-    value_col: str = "평균보증금",
+    mean_col: str,
+    unit_divisor: float,
+    unit_name: str,
     top_n: int = 25,
 ) -> Path:
-    """구별 평균 전세보증금 막대그래프를 그려 PNG로 저장한다."""
+    """구별 평균값 막대그래프를 그려 PNG로 저장한다."""
     data = district_summary.head(top_n).copy()
-    data[f"{value_col}_억"] = data[value_col] / 10000
+    scaled_col = f"{mean_col}_scaled"
+    data[scaled_col] = data[mean_col] / unit_divisor
 
     fig, ax = plt.subplots(figsize=(11, 6.5))
-    bars = ax.bar(data["구명"], data[f"{value_col}_억"], color="#3b6ea5")
+    bars = ax.bar(data["구명"], data[scaled_col], color="#3b6ea5")
 
     ax.set_title(title, fontsize=15, fontweight="bold", pad=14)
-    ax.set_ylabel("평균 전세보증금 (억 원)")
+    ax.set_ylabel(f"{mean_col} ({unit_name})")
     ax.set_xticks(range(len(data)))
     ax.set_xticklabels(data["구명"], rotation=45, ha="right")
     ax.grid(axis="y", linestyle="--", alpha=0.4)
 
-    for bar, value in zip(bars, data[f"{value_col}_억"]):
+    for bar, value in zip(bars, data[scaled_col]):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height(),
