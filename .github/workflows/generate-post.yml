@@ -1,9 +1,9 @@
 name: 데이터 기반 블로그 글 자동 생성 (PR)
 
-# 매일 한국시간(KST, UTC+9) 오전 8시 = UTC 23:00(전날) 실행.
+# 주 3회(월/수/금) 한국시간(KST, UTC+9) 오전 8시 = UTC 23:00(일/화/목) 실행.
 on:
   schedule:
-    - cron: "0 23 * * *"
+    - cron: "0 23 * * 0,2,4"
   workflow_dispatch:
     inputs:
       month:

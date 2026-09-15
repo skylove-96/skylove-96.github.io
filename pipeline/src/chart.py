@@ -30,19 +30,20 @@ def district_bar_chart(
     unit_divisor: float,
     unit_name: str,
     top_n: int = 25,
+    group_col: str = "구명",
 ) -> Path:
-    """구별 평균값 막대그래프를 그려 PNG로 저장한다."""
+    """{group_col} 기준 평균값 막대그래프를 그려 PNG로 저장한다."""
     data = district_summary.head(top_n).copy()
     scaled_col = f"{mean_col}_scaled"
     data[scaled_col] = data[mean_col] / unit_divisor
 
     fig, ax = plt.subplots(figsize=(11, 6.5))
-    bars = ax.bar(data["구명"], data[scaled_col], color="#3b6ea5")
+    bars = ax.bar(data[group_col], data[scaled_col], color="#3b6ea5")
 
     ax.set_title(title, fontsize=15, fontweight="bold", pad=14)
     ax.set_ylabel(f"{mean_col} ({unit_name})")
     ax.set_xticks(range(len(data)))
-    ax.set_xticklabels(data["구명"], rotation=45, ha="right")
+    ax.set_xticklabels(data[group_col], rotation=45, ha="right")
     ax.grid(axis="y", linestyle="--", alpha=0.4)
 
     for bar, value in zip(bars, data[scaled_col]):
