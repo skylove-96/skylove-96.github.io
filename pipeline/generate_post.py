@@ -390,7 +390,7 @@ def build_body(
 
 {table_md}
 
-## 이번 달 인사이트
+## {year}년 {month}월 {group_header}별 인사이트
 
 {insight_lines}
 """
@@ -595,7 +595,7 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
 
 {table_md}
 
-## 이번 달 인사이트
+## {year}년 {month}월 자치구별 인사이트
 
 {insight_lines}
 """
