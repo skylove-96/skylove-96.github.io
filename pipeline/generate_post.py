@@ -22,6 +22,7 @@ import random
 import re
 import sys
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -138,6 +139,13 @@ CANDIDATE_TOPICS = TOPICS + [{"id": VOLUME_PRICE_TOPIC_ID}]
 
 SLUG_RE = re.compile(r"^seoul-apt-([a-z]+)-(\d{6})$")
 DATE_RE = re.compile(r"^date:\s*(\S+)", re.MULTILINE)
+TITLE_RE = re.compile(r'^title:\s*"(.*)"\s*$', re.MULTILINE)
+
+# 제목이 겹칠 때 더 구체화를 몇 번까지 시도할지, 그리고 그때마다 슬러그 뒤에 붙일 접미사.
+# 'a'는 접미사 없는 기본 슬러그와 헷갈리므로 뺀다.
+MAX_TITLE_DEDUPE_ATTEMPTS = 5
+SLUG_SUFFIX_LETTERS = "bcdefghijklmnopqrstuvwxyz"
+TITLE_SIMILARITY_THRESHOLD = 0.85
 
 
 class TopicSkipped(Exception):
@@ -211,6 +219,92 @@ def order_topics_by_recency(topics: list[dict]) -> list[dict]:
         never_used = never_used[shift:] + never_used[:shift]
 
     return never_used + used
+
+
+def existing_month_titles(deal_ymd: str) -> list[tuple[str, str]]:
+    """같은 분석월(deal_ymd)로 이미 생성된 글들의 (slug, title) 목록.
+
+    주 3회 실행되는 동안 deal_ymd(지난달)는 한 달 내내 그대로이므로, 6개뿐인 후보
+    주제가 순환하다 보면 같은 달에 같은 주제가 다시 뽑혀 제목이 그대로 겹칠 수 있다.
+    이 목록은 그 중복을 판별하는 비교 대상이며, 실제 파일시스템(main에 병합된 글)
+    기준이라 병합 전 PR끼리의 충돌까지는 잡지 못한다.
+    """
+    if not CONTENT_POSTS_DIR.exists():
+        return []
+
+    results: list[tuple[str, str]] = []
+    for post_dir in sorted(CONTENT_POSTS_DIR.iterdir()):
+        if not post_dir.is_dir() or not post_dir.name.endswith(f"-{deal_ymd}"):
+            continue
+        index_md = post_dir / "index.md"
+        if not index_md.exists():
+            continue
+        text = index_md.read_text(encoding="utf-8", errors="ignore")
+        title_match = TITLE_RE.search(text)
+        if title_match:
+            results.append((post_dir.name, title_match.group(1)))
+    return results
+
+
+def _comparable_title(title: str, deal_ymd: str) -> str:
+    """비교용으로 다듬은 제목.
+
+    모든 제목이 요구사항 1에 따라 "{year}년 {month}월 서울 아파트 " 접두사를
+    공통으로 갖기 때문에, 이 접두사를 포함해 그대로 비교하면 주제가 전혀 달라도
+    (예: 전세가 동향 vs 월세 시장 동향) 유사도가 항상 높게 나와 오탐이 난다.
+    그래서 접두사를 뗀 "분석 관점" 부분만 비교한다.
+    """
+    year, month = deal_ymd[:4], int(deal_ymd[4:])
+    prefix = f"{year}년 {month}월 {REGION_LABEL} 아파트 "
+    core = title[len(prefix):] if title.startswith(prefix) else title
+    return re.sub(r"[\s\-()·,]", "", core)
+
+
+def is_title_too_similar(candidate: str, existing_titles: list[str], deal_ymd: str) -> bool:
+    norm_candidate = _comparable_title(candidate, deal_ymd)
+    for existing in existing_titles:
+        norm_existing = _comparable_title(existing, deal_ymd)
+        if norm_candidate == norm_existing:
+            return True
+        if SequenceMatcher(None, norm_candidate, norm_existing).ratio() >= TITLE_SIMILARITY_THRESHOLD:
+            return True
+    return False
+
+
+def dedupe_title_and_slug(
+    *,
+    topic_id: str,
+    base_title: str,
+    base_slug: str,
+    deal_ymd: str,
+    ranked_focus_names: list[str],
+) -> tuple[str, str]:
+    """이번 달에 이미 겹치거나 너무 비슷한 제목이 있으면 더 구체화해서 다시 만든다.
+
+    ranked_focus_names는 이번 분석에서 실제로 두드러진 항목(구/평형대 등)을 순위대로
+    나열한 것이며, 매 시도마다 다음 순위 항목을 제목에 덧붙여 재충돌 가능성을 줄인다.
+    슬러그도 같은 시도 순번의 접미사를 붙여 제목과 일관되게 유지한다
+    (post/날짜-slug 브랜치 규칙은 그대로 유지됨).
+    """
+    existing = existing_month_titles(deal_ymd)
+    existing_titles = [t for _, t in existing]
+    existing_slugs = {s for s, _ in existing}
+
+    title, slug = base_title, base_slug
+    attempt = 0
+    max_attempts = min(MAX_TITLE_DEDUPE_ATTEMPTS, len(ranked_focus_names), len(SLUG_SUFFIX_LETTERS))
+    while (
+        is_title_too_similar(title, existing_titles, deal_ymd) or slug in existing_slugs
+    ) and attempt < max_attempts:
+        focus = ranked_focus_names[attempt]
+        title = f"{base_title} ({focus} 중심)"
+        slug = f"seoul-apt-{topic_id}{SLUG_SUFFIX_LETTERS[attempt]}-{deal_ymd}"
+        attempt += 1
+
+    if is_title_too_similar(title, existing_titles, deal_ymd) or slug in existing_slugs:
+        raise TopicSkipped(f"[{topic_id}] 이번 달에 이미 비슷한 글이 있어 구체화를 시도했지만 계속 겹침")
+
+    return title, slug
 
 
 def make_mock_rows(deal_ymd: str, districts: list[str]) -> list[dict]:
@@ -378,6 +472,16 @@ def try_topic(
     title = topic["title_template"].format(year=year, month=month, region=REGION_LABEL)
     slug = f"seoul-apt-{topic['id']}-{deal_ymd}"
 
+    if not group_summary.empty:
+        ranked_focus_names = [str(name) for name in group_summary[group_col].tolist()]
+        title, slug = dedupe_title_and_slug(
+            topic_id=topic["id"],
+            base_title=title,
+            base_slug=slug,
+            deal_ymd=deal_ymd,
+            ranked_focus_names=ranked_focus_names,
+        )
+
     # ---- 여기부터 표/차트/본문 생성. 이 구간에서 나는 예외는 '기술적 실패'로 취급한다. ----
     body = build_body(
         topic=topic,
@@ -433,6 +537,15 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
     month_label = f"{year}년 {month}월"
     title = VOLUME_PRICE_TITLE_TEMPLATE.format(year=year, month=month, region=REGION_LABEL)
     slug = f"seoul-apt-{VOLUME_PRICE_TOPIC_ID}-{deal_ymd}"
+
+    ranked_focus_names = [str(name) for name in vp_df["구명"].tolist()]
+    title, slug = dedupe_title_and_slug(
+        topic_id=VOLUME_PRICE_TOPIC_ID,
+        base_title=title,
+        base_slug=slug,
+        deal_ymd=deal_ymd,
+        ranked_focus_names=ranked_focus_names,
+    )
 
     most_traded = vp_df.iloc[0]
     biggest_gain = vp_df.sort_values("가격변동률", ascending=False).iloc[0]
