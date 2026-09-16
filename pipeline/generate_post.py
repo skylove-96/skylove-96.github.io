@@ -356,6 +356,7 @@ def group_table_markdown(
 
 def build_body(
     *,
+    title: str,
     topic: dict,
     deal_ymd: str,
     reference_ymd: str,
@@ -365,6 +366,14 @@ def build_body(
     group_col: str,
     group_header: str,
 ) -> str:
+    """본문 마크다운을 만든다.
+
+    표/인사이트 소제목은 그냥 "{group_header}별 인사이트" 식으로 두면, 같은 달에
+    같은 그룹 기준(예: 자치구)을 쓰는 다른 주제(전세/전년비교 등)와 소제목이
+    그대로 겹친다. 이미 대상+시점+관점을 담고 있고(dedupe_title_and_slug에서
+    같은 달 중복까지 걸러진) 글 제목(title)을 소제목 앞에 그대로 붙여, 소제목도
+    같은 구체성/유일성을 물려받도록 한다.
+    """
     year, month = deal_ymd[:4], int(deal_ymd[4:])
     ref_year, ref_month = reference_ymd[:4], int(reference_ymd[4:])
     mean_col = f"평균 {topic['out_prefix']}"
@@ -384,13 +393,13 @@ def build_body(
 - 비교 기준월: {ref_year}년 {ref_month}월 ({compare_label} 대비 증감률 계산용)
 - 실거래 신고는 계약 후 30일 이내에 이루어지므로, 최근월 데이터는 이후 계속 소폭 갱신될 수 있습니다.{method_note}
 
-## {group_header}별 {mean_col}
+## {title} · {group_header}별 {mean_col}
 
 ![{year}년 {month}월 {REGION_LABEL} {group_header}별 {mean_col}](chart.png)
 
 {table_md}
 
-## {year}년 {month}월 {group_header}별 인사이트
+## {title} · {group_header}별 인사이트
 
 {insight_lines}
 """
@@ -484,6 +493,7 @@ def try_topic(
 
     # ---- 여기부터 표/차트/본문 생성. 이 구간에서 나는 예외는 '기술적 실패'로 취급한다. ----
     body = build_body(
+        title=title,
         topic=topic,
         deal_ymd=deal_ymd,
         reference_ymd=reference_ymd,
@@ -589,13 +599,13 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
 - 비교 기준월: {prev_ymd[:4]}년 {int(prev_ymd[4:])}월 (전월 대비 가격 변동률 계산용)
 - 가격 변동률은 자치구별 평균 전세보증금 기준이며, 거래건수는 순수 전세 계약 건수 기준입니다.
 
-## 자치구별 거래건수와 가격 변동률
+## {title} · 자치구별 거래건수와 가격 변동률
 
 ![{year}년 {month}월 {REGION_LABEL} 자치구별 순수 전세 거래건수](chart.png)
 
 {table_md}
 
-## {year}년 {month}월 자치구별 인사이트
+## {title} · 자치구별 인사이트
 
 {insight_lines}
 """
