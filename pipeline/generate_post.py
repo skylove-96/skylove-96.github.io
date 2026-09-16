@@ -39,6 +39,7 @@ from config import (  # noqa: E402
     DATASETS,
     MIN_BODY_CHARS,
     MIN_TRANSACTIONS,
+    PROMO_MIN_GAP,
     PROMO_PROBABILITY,
     SEOUL_DISTRICTS,
 )
@@ -141,6 +142,10 @@ SLUG_RE = re.compile(r"^seoul-apt-([a-z]+)-(\d{6})$")
 DATE_RE = re.compile(r"^date:\s*(\S+)", re.MULTILINE)
 TITLE_RE = re.compile(r'^title:\s*"(.*)"\s*$', re.MULTILINE)
 
+# books.PROMO_TEMPLATE이 항상 이 문구로 시작하므로, 이미 발행된 글에 홍보 문구가
+# 있었는지는 본문에 이 문구가 있는지로 판별한다.
+PROMO_MARKER = "이런 데이터를 직접 파이썬으로 분석해보고 싶으신 분들을 위해"
+
 # 제목이 겹칠 때 더 구체화를 몇 번까지 시도할지, 그리고 그때마다 슬러그 뒤에 붙일 접미사.
 # 'a'는 접미사 없는 기본 슬러그와 헷갈리므로 뺀다.
 MAX_TITLE_DEDUPE_ATTEMPTS = 5
@@ -200,6 +205,34 @@ def recent_topic_ids(limit: int = 12) -> list[str]:
 
     entries.sort(key=lambda pair: pair[0], reverse=True)
     return [topic_id for _, topic_id in entries[:limit]]
+
+
+def recent_posts_have_promo(limit: int) -> bool:
+    """최근 발행된 글 중 최대 limit편 이내에 전자책 홍보 문구가 있었는지 확인한다.
+
+    바로 직전 글(limit편 중 가장 최근 1건)과 최근 limit편 전체를 함께 판단하는
+    데 쓰인다. content/posts 아래 실제 파일(=병합되어 실제 발행된 글) 기준이라,
+    recent_topic_ids와 마찬가지로 병합 전 PR끼리의 충돌까지는 잡지 못한다.
+    """
+    if not CONTENT_POSTS_DIR.exists():
+        return False
+
+    entries: list[tuple[str, str]] = []
+    for post_dir in CONTENT_POSTS_DIR.iterdir():
+        if not post_dir.is_dir():
+            continue
+        if not SLUG_RE.match(post_dir.name):
+            continue
+        index_md = post_dir / "index.md"
+        if not index_md.exists():
+            continue
+        text = index_md.read_text(encoding="utf-8", errors="ignore")
+        date_match = DATE_RE.search(text)
+        sort_key = date_match.group(1) if date_match else post_dir.name
+        entries.append((sort_key, text))
+
+    entries.sort(key=lambda pair: pair[0], reverse=True)
+    return any(PROMO_MARKER in text for _, text in entries[:limit])
 
 
 def order_topics_by_recency(topics: list[dict]) -> list[dict]:
@@ -422,6 +455,8 @@ def write_post(post_dir: Path, title: str, tags: list[str], summary: str, body: 
 
 
 def maybe_add_promo(body: str) -> str:
+    if recent_posts_have_promo(PROMO_MIN_GAP):
+        return body
     if random.random() < PROMO_PROBABILITY:
         promo = books.promo_for_book_key(BOOKS_FILE, DATASETS[DATASET_KEY]["book_key"])
         if promo:

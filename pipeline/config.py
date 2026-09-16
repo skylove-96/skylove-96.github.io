@@ -85,6 +85,10 @@ NUM_ROWS_PER_DISTRICT = 1000
 # 전자책 홍보 문구를 글에 넣을 확률 (0.0~1.0). naver-blog-bot의 PROMO_PROBABILITY와 같은 개념.
 PROMO_PROBABILITY = 0.7
 
+# 홍보 문구가 있었던 글 이후, 최소 이만큼의 글을 건너뛰기 전에는 다시 넣지 않는다
+# (바로 직전 글 포함). 예: 3이면 직전 3편 중 하나라도 홍보 문구가 있었으면 이번 글엔 넣지 않음.
+PROMO_MIN_GAP = 3
+
 CATEGORY_LABEL = "데이터분석"
 
 # 애드센스 등 콘텐츠 품질 기준을 위한 발행 전 체크 값.
