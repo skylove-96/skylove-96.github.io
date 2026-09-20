@@ -1,6 +1,7 @@
-"""서울 아파트 전월세 실거래 데이터로 블로그 글을 자동 생성한다.
+"""전국 지역별 아파트 전월세 실거래 데이터로 블로그 글을 자동 생성한다.
 
 주 3회(월/수/금) 실행을 상정하며, 아래 순서로 동작한다:
+  0. 이번 주(월요일 기준)에 다룰 지역을 REGION_ROTATION 순서대로 고름 (--region으로 강제 지정 가능)
   1. 이번 달/전월(또는 전년 동월) 실거래 데이터를 필요한 만큼 수집 (apt_rent API)
   2. 후보 주제(전세/월세/전환율/평형대/전년비교/거래량-가격)를 최근 발행 이력 기준으로
      "오래 쓰이지 않은 주제부터" 순서를 바꿔가며 시도
@@ -10,8 +11,9 @@
   5. 성공하면 stdout에 `::post-meta::{...}` 한 줄을 출력해 CI가 PR 정보를 읽어가게 함
 
 사용 예:
-    python generate_post.py                 # 지난달 데이터, 실제 API
+    python generate_post.py                 # 지난달 데이터, 실제 API, 이번 주 로테이션 지역 자동 선택
     python generate_post.py --month 202608  # 특정 월 지정
+    python generate_post.py --region gyeonggi  # 로테이션 대신 특정 지역 강제 지정
     python generate_post.py --mock          # API 키 없이 가짜 데이터로 파이프라인만 검증
 """
 from __future__ import annotations
@@ -41,7 +43,8 @@ from config import (  # noqa: E402
     MIN_TRANSACTIONS,
     PROMO_MIN_GAP,
     PROMO_PROBABILITY,
-    SEOUL_DISTRICTS,
+    REGION_ROTATION,
+    REGIONS,
 )
 from src import analyze, books, chart, molit_api  # noqa: E402
 from src.molit_api import ApiKey  # noqa: E402
@@ -50,8 +53,34 @@ KST = ZoneInfo("Asia/Seoul")
 BOOKS_FILE = PIPELINE_DIR / "books.json"
 CONTENT_POSTS_DIR = PROJECT_ROOT / "content" / "posts"
 DATA_SOURCE_URL = "https://www.data.go.kr/data/15126474/openapi.do"
-REGION_LABEL = "서울"
 DATASET_KEY = "apt_rent"  # 모든 후보 주제가 같은 API(apt_rent)에서 필터/가공만 다르게 쓴다.
+
+# 로테이션 시작점(월요일). 이 날짜로부터 몇 주가 지났는지로 이번 주 지역을 정하기 때문에,
+# 이 값 자체가 바뀌어도(과거로 옮겨도) 로테이션 "순서"는 바뀌지 않고 위상만 바뀐다.
+# 2024-01-08로 맞춘 이유: 서울만 다루던 마지막 주(2026-09-14 주)가 REGION_ROTATION의
+# 첫 항목("seoul")과 위상이 맞도록 해서, 그다음 주(2026-09-21 주)부터 "gyeonggi"로
+# 자연스럽게 이어지게 하기 위함.
+ROTATION_EPOCH = datetime(2024, 1, 8, tzinfo=ZoneInfo("Asia/Seoul"))
+
+
+def active_region_rotation() -> list[str]:
+    """districts가 아직 채워지지 않은(TODO) 지역은 로테이션에서 제외한다."""
+    active = [key for key in REGION_ROTATION if REGIONS[key]["districts"]]
+    if not active:
+        raise RuntimeError("REGIONS에 districts가 채워진 지역이 하나도 없습니다.")
+    return active
+
+
+def pick_region_for_week(today: datetime | None = None) -> str:
+    """이번 주(월요일 기준)에 다룰 지역을 로테이션 순서대로 고른다.
+
+    같은 주의 월/수/금 실행이 모두 같은 지역을 다루도록, ISO 주차가 아니라
+    ROTATION_EPOCH로부터 지난 '주 수'를 기준으로 삼는다 (연도가 바뀌어도 순서가 끊기지 않음).
+    """
+    today = today or datetime.now(KST)
+    weeks_elapsed = (today.date() - ROTATION_EPOCH.date()).days // 7
+    rotation = active_region_rotation()
+    return rotation[weeks_elapsed % len(rotation)]
 
 # id는 발행된 글의 slug(seoul-apt-{id}-{yyyymm})에 그대로 쓰이므로 영소문자만 사용한다.
 TOPICS = [
@@ -138,7 +167,7 @@ VOLUME_PRICE_TAGS = ["아파트", "전세", "거래량", "실거래가"]
 # (volumeprice는 전용 분석 함수를 쓰므로 TOPICS 리스트에는 없고 자리표시자만 추가한다).
 CANDIDATE_TOPICS = TOPICS + [{"id": VOLUME_PRICE_TOPIC_ID}]
 
-SLUG_RE = re.compile(r"^seoul-apt-([a-z]+)-(\d{6})$")
+SLUG_RE = re.compile(r"^([a-z]+)-apt-([a-z]+)-(\d{6})$")
 DATE_RE = re.compile(r"^date:\s*(\S+)", re.MULTILINE)
 TITLE_RE = re.compile(r'^title:\s*"(.*)"\s*$', re.MULTILINE)
 
@@ -200,8 +229,8 @@ def recent_topic_ids(limit: int = 12) -> list[str]:
         text = index_md.read_text(encoding="utf-8", errors="ignore")
         date_match = DATE_RE.search(text)
         # 날짜를 못 읽으면 slug에 박힌 계약월(YYYYMM)로라도 대략 정렬한다.
-        sort_key = date_match.group(1) if date_match else match.group(2)
-        entries.append((sort_key, match.group(1)))
+        sort_key = date_match.group(1) if date_match else match.group(3)
+        entries.append((sort_key, match.group(2)))
 
     entries.sort(key=lambda pair: pair[0], reverse=True)
     return [topic_id for _, topic_id in entries[:limit]]
@@ -254,20 +283,21 @@ def order_topics_by_recency(topics: list[dict]) -> list[dict]:
     return never_used + used
 
 
-def existing_month_titles(deal_ymd: str) -> list[tuple[str, str]]:
-    """같은 분석월(deal_ymd)로 이미 생성된 글들의 (slug, title) 목록.
+def existing_month_titles(region_key: str, deal_ymd: str) -> list[tuple[str, str]]:
+    """같은 지역·같은 분석월(deal_ymd)로 이미 생성된 글들의 (slug, title) 목록.
 
     주 3회 실행되는 동안 deal_ymd(지난달)는 한 달 내내 그대로이므로, 6개뿐인 후보
-    주제가 순환하다 보면 같은 달에 같은 주제가 다시 뽑혀 제목이 그대로 겹칠 수 있다.
-    이 목록은 그 중복을 판별하는 비교 대상이며, 실제 파일시스템(main에 병합된 글)
-    기준이라 병합 전 PR끼리의 충돌까지는 잡지 못한다.
+    주제가 순환하다 보면 같은 지역·같은 달에 같은 주제가 다시 뽑혀 제목이 그대로
+    겹칠 수 있다. 이 목록은 그 중복을 판별하는 비교 대상이며, 실제 파일시스템
+    (main에 병합된 글) 기준이라 병합 전 PR끼리의 충돌까지는 잡지 못한다.
     """
     if not CONTENT_POSTS_DIR.exists():
         return []
 
+    prefix, suffix = f"{region_key}-apt-", f"-{deal_ymd}"
     results: list[tuple[str, str]] = []
     for post_dir in sorted(CONTENT_POSTS_DIR.iterdir()):
-        if not post_dir.is_dir() or not post_dir.name.endswith(f"-{deal_ymd}"):
+        if not post_dir.is_dir() or not post_dir.name.startswith(prefix) or not post_dir.name.endswith(suffix):
             continue
         index_md = post_dir / "index.md"
         if not index_md.exists():
@@ -279,24 +309,26 @@ def existing_month_titles(deal_ymd: str) -> list[tuple[str, str]]:
     return results
 
 
-def _comparable_title(title: str, deal_ymd: str) -> str:
+def _comparable_title(title: str, region_label: str, deal_ymd: str) -> str:
     """비교용으로 다듬은 제목.
 
-    모든 제목이 요구사항 1에 따라 "{year}년 {month}월 서울 아파트 " 접두사를
+    모든 제목이 요구사항 1에 따라 "{year}년 {month}월 {지역명} 아파트 " 접두사를
     공통으로 갖기 때문에, 이 접두사를 포함해 그대로 비교하면 주제가 전혀 달라도
     (예: 전세가 동향 vs 월세 시장 동향) 유사도가 항상 높게 나와 오탐이 난다.
     그래서 접두사를 뗀 "분석 관점" 부분만 비교한다.
     """
     year, month = deal_ymd[:4], int(deal_ymd[4:])
-    prefix = f"{year}년 {month}월 {REGION_LABEL} 아파트 "
+    prefix = f"{year}년 {month}월 {region_label} 아파트 "
     core = title[len(prefix):] if title.startswith(prefix) else title
     return re.sub(r"[\s\-()·,]", "", core)
 
 
-def is_title_too_similar(candidate: str, existing_titles: list[str], deal_ymd: str) -> bool:
-    norm_candidate = _comparable_title(candidate, deal_ymd)
+def is_title_too_similar(
+    candidate: str, existing_titles: list[str], region_label: str, deal_ymd: str
+) -> bool:
+    norm_candidate = _comparable_title(candidate, region_label, deal_ymd)
     for existing in existing_titles:
-        norm_existing = _comparable_title(existing, deal_ymd)
+        norm_existing = _comparable_title(existing, region_label, deal_ymd)
         if norm_candidate == norm_existing:
             return True
         if SequenceMatcher(None, norm_candidate, norm_existing).ratio() >= TITLE_SIMILARITY_THRESHOLD:
@@ -306,20 +338,22 @@ def is_title_too_similar(candidate: str, existing_titles: list[str], deal_ymd: s
 
 def dedupe_title_and_slug(
     *,
+    region_key: str,
+    region_label: str,
     topic_id: str,
     base_title: str,
     base_slug: str,
     deal_ymd: str,
     ranked_focus_names: list[str],
 ) -> tuple[str, str]:
-    """이번 달에 이미 겹치거나 너무 비슷한 제목이 있으면 더 구체화해서 다시 만든다.
+    """이번 지역·이번 달에 이미 겹치거나 너무 비슷한 제목이 있으면 더 구체화해서 다시 만든다.
 
     ranked_focus_names는 이번 분석에서 실제로 두드러진 항목(구/평형대 등)을 순위대로
     나열한 것이며, 매 시도마다 다음 순위 항목을 제목에 덧붙여 재충돌 가능성을 줄인다.
     슬러그도 같은 시도 순번의 접미사를 붙여 제목과 일관되게 유지한다
     (post/날짜-slug 브랜치 규칙은 그대로 유지됨).
     """
-    existing = existing_month_titles(deal_ymd)
+    existing = existing_month_titles(region_key, deal_ymd)
     existing_titles = [t for _, t in existing]
     existing_slugs = {s for s, _ in existing}
 
@@ -327,15 +361,15 @@ def dedupe_title_and_slug(
     attempt = 0
     max_attempts = min(MAX_TITLE_DEDUPE_ATTEMPTS, len(ranked_focus_names), len(SLUG_SUFFIX_LETTERS))
     while (
-        is_title_too_similar(title, existing_titles, deal_ymd) or slug in existing_slugs
+        is_title_too_similar(title, existing_titles, region_label, deal_ymd) or slug in existing_slugs
     ) and attempt < max_attempts:
         focus = ranked_focus_names[attempt]
         title = f"{base_title} ({focus} 중심)"
-        slug = f"seoul-apt-{topic_id}{SLUG_SUFFIX_LETTERS[attempt]}-{deal_ymd}"
+        slug = f"{region_key}-apt-{topic_id}{SLUG_SUFFIX_LETTERS[attempt]}-{deal_ymd}"
         attempt += 1
 
-    if is_title_too_similar(title, existing_titles, deal_ymd) or slug in existing_slugs:
-        raise TopicSkipped(f"[{topic_id}] 이번 달에 이미 비슷한 글이 있어 구체화를 시도했지만 계속 겹침")
+    if is_title_too_similar(title, existing_titles, region_label, deal_ymd) or slug in existing_slugs:
+        raise TopicSkipped(f"[{topic_id}] 이번 지역·달에 이미 비슷한 글이 있어 구체화를 시도했지만 계속 겹침")
 
     return title, slug
 
@@ -363,10 +397,12 @@ def make_mock_rows(deal_ymd: str, districts: list[str]) -> list[dict]:
     return rows
 
 
-def fetch_month_rows(operation: str, deal_ymd: str, api_key: ApiKey, mock: bool) -> list[dict]:
+def fetch_month_rows(
+    operation: str, deal_ymd: str, api_key: ApiKey, mock: bool, districts: dict
+) -> list[dict]:
     if mock:
-        return make_mock_rows(deal_ymd, list(SEOUL_DISTRICTS.keys()))
-    raw_rows = molit_api.fetch_region_month(operation, SEOUL_DISTRICTS, deal_ymd, api_key)
+        return make_mock_rows(deal_ymd, list(districts.keys()))
+    raw_rows = molit_api.fetch_region_month(operation, districts, deal_ymd, api_key)
     return [molit_api.normalize_rent_row(row) for row in raw_rows]
 
 
@@ -391,6 +427,8 @@ def build_body(
     *,
     title: str,
     topic: dict,
+    region_label: str,
+    group_count_desc: str,
     deal_ymd: str,
     reference_ymd: str,
     compare_label: str,
@@ -417,18 +455,18 @@ def build_body(
 
     return f"""
 공공데이터포털의 국토교통부 아파트 전월세 실거래자료를 파이썬으로 직접 수집·분석해
-{year}년 {month}월 {REGION_LABEL} 아파트 {topic['deal_desc']} 시장 흐름을 정리했습니다.
+{year}년 {month}월 {region_label} 아파트 {topic['deal_desc']} 시장 흐름을 정리했습니다.
 
 ## 분석 방법
 
 - 데이터 출처: [국토교통부 아파트 전월세 실거래자료]({DATA_SOURCE_URL}) (공공데이터포털 Open API)
-- 분석 대상: {REGION_LABEL} 25개 자치구, {year}년 {month}월 신고 기준 {topic['deal_desc']} 계약
+- 분석 대상: {region_label} {group_count_desc}, {year}년 {month}월 신고 기준 {topic['deal_desc']} 계약
 - 비교 기준월: {ref_year}년 {ref_month}월 ({compare_label} 대비 증감률 계산용)
 - 실거래 신고는 계약 후 30일 이내에 이루어지므로, 최근월 데이터는 이후 계속 소폭 갱신될 수 있습니다.{method_note}
 
 ## {title} · {group_header}별 {mean_col}
 
-![{year}년 {month}월 {REGION_LABEL} {group_header}별 {mean_col}](chart.png)
+![{year}년 {month}월 {region_label} {group_header}별 {mean_col}](chart.png)
 
 {table_md}
 
@@ -466,6 +504,9 @@ def maybe_add_promo(body: str) -> str:
 
 def try_topic(
     topic: dict,
+    region_key: str,
+    region_label: str,
+    region_group_label: str,
     this_df_all,
     reference_df_all,
     deal_ymd: str,
@@ -477,8 +518,8 @@ def try_topic(
     호출부에서 '기술적 실패'로 처리되고, 다른 주제로 넘어가지 않는다.
     """
     group_col = topic.get("group_col", "구명")
-    group_header = topic.get("group_header", group_col if group_col != "구명" else "자치구")
-    group_count_desc = topic.get("group_count_desc", "25개 자치구")
+    group_header = topic.get("group_header", group_col if group_col != "구명" else region_group_label)
+    group_count_desc = topic.get("group_count_desc", f"{len(REGIONS[region_key]['districts'])}개 {region_group_label}")
     group_noun = topic.get("group_noun", "곳")
     compare_label = topic.get("compare_label", "전월")
 
@@ -498,7 +539,7 @@ def try_topic(
         this_df,
         reference_df,
         group_summary,
-        REGION_LABEL,
+        region_label,
         month_label,
         value_col=topic["value_col"],
         out_prefix=topic["out_prefix"],
@@ -513,12 +554,14 @@ def try_topic(
     )
 
     year, month = deal_ymd[:4], int(deal_ymd[4:])
-    title = topic["title_template"].format(year=year, month=month, region=REGION_LABEL)
-    slug = f"seoul-apt-{topic['id']}-{deal_ymd}"
+    title = topic["title_template"].format(year=year, month=month, region=region_label)
+    slug = f"{region_key}-apt-{topic['id']}-{deal_ymd}"
 
     if not group_summary.empty:
         ranked_focus_names = [str(name) for name in group_summary[group_col].tolist()]
         title, slug = dedupe_title_and_slug(
+            region_key=region_key,
+            region_label=region_label,
             topic_id=topic["id"],
             base_title=title,
             base_slug=slug,
@@ -530,6 +573,8 @@ def try_topic(
     body = build_body(
         title=title,
         topic=topic,
+        region_label=region_label,
+        group_count_desc=group_count_desc,
         deal_ymd=deal_ymd,
         reference_ymd=reference_ymd,
         compare_label=compare_label,
@@ -547,7 +592,7 @@ def try_topic(
     chart.district_bar_chart(
         group_summary,
         post_dir / "chart.png",
-        title=f"{month_label} {REGION_LABEL} {group_col}별 평균 {topic['out_prefix']}",
+        title=f"{month_label} {region_label} {group_header}별 평균 {topic['out_prefix']}",
         mean_col=f"평균 {topic['out_prefix']}",
         unit_divisor=topic["unit_divisor"],
         unit_name=topic["unit_name"],
@@ -555,7 +600,7 @@ def try_topic(
     )
 
     body = maybe_add_promo(body)
-    summary = f"{month_label} {REGION_LABEL} 아파트 {topic['deal_desc']} 실거래 데이터 분석"
+    summary = f"{month_label} {region_label} 아파트 {topic['deal_desc']} 실거래 데이터 분석"
     write_post(post_dir, title, topic["tags"], summary, body)
 
     return {
@@ -567,11 +612,19 @@ def try_topic(
     }
 
 
-def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str) -> dict:
+def try_volumeprice_topic(
+    region_key: str,
+    region_label: str,
+    region_group_label: str,
+    this_df_all,
+    prev_df_all,
+    deal_ymd: str,
+    prev_ymd: str,
+) -> dict:
     """거래량과 가격 변동률의 관계를 분석한다. 표/인사이트 구조가 달라 전용 함수로 처리한다."""
     vp_df = analyze.build_volume_price_table(this_df_all, prev_df_all)
     if len(vp_df) < 5:
-        raise TopicSkipped(f"[{VOLUME_PRICE_TOPIC_ID}] 비교 가능한 자치구 수 부족: {len(vp_df)}개 < 최소 5개")
+        raise TopicSkipped(f"[{VOLUME_PRICE_TOPIC_ID}] 비교 가능한 {region_group_label} 수 부족: {len(vp_df)}개 < 최소 5개")
 
     total_contracts = int(vp_df["거래건수"].sum())
     if total_contracts < MIN_TRANSACTIONS:
@@ -580,11 +633,13 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
     corr = analyze.transaction_price_correlation(vp_df)
     year, month = deal_ymd[:4], int(deal_ymd[4:])
     month_label = f"{year}년 {month}월"
-    title = VOLUME_PRICE_TITLE_TEMPLATE.format(year=year, month=month, region=REGION_LABEL)
-    slug = f"seoul-apt-{VOLUME_PRICE_TOPIC_ID}-{deal_ymd}"
+    title = VOLUME_PRICE_TITLE_TEMPLATE.format(year=year, month=month, region=region_label)
+    slug = f"{region_key}-apt-{VOLUME_PRICE_TOPIC_ID}-{deal_ymd}"
 
     ranked_focus_names = [str(name) for name in vp_df["구명"].tolist()]
     title, slug = dedupe_title_and_slug(
+        region_key=region_key,
+        region_label=region_label,
         topic_id=VOLUME_PRICE_TOPIC_ID,
         base_title=title,
         base_slug=slug,
@@ -597,7 +652,7 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
     biggest_drop = vp_df.sort_values("가격변동률", ascending=True).iloc[0]
 
     if corr is None:
-        corr_desc = "표본 자치구 수가 적어 상관계수는 참고용으로만 확인해주세요."
+        corr_desc = f"표본 {region_group_label} 수가 적어 상관계수는 참고용으로만 확인해주세요."
     else:
         strength = "뚜렷한" if abs(corr) >= 0.5 else ("약한" if abs(corr) >= 0.2 else "거의 없는")
         direction = (
@@ -607,17 +662,18 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
         )
         corr_desc = f"거래건수와 가격 변동률의 상관계수는 {corr:.2f}로, {strength} {direction} 관계를 보였습니다."
 
+    group_count_desc = f"{len(REGIONS[region_key]['districts'])}개 {region_group_label}"
     insights = [
-        f"{month_label} {REGION_LABEL} 25개 자치구 중 순수 전세 거래가 가장 활발한 곳은 "
+        f"{month_label} {region_label} {group_count_desc} 중 순수 전세 거래가 가장 활발한 곳은 "
         f"{most_traded['구명']}({int(most_traded['거래건수'])}건)이었습니다.",
         f"전월 대비 평균 전세보증금이 가장 많이 오른 곳은 {biggest_gain['구명']}"
         f"({biggest_gain['가격변동률']:+.1f}%), 가장 많이 내린 곳은 {biggest_drop['구명']}"
         f"({biggest_drop['가격변동률']:+.1f}%)이었습니다.",
         corr_desc,
-        "상관관계는 인과관계를 의미하지 않으며, 표본 수가 적은 자치구는 결과가 왜곡될 수 있습니다.",
+        f"상관관계는 인과관계를 의미하지 않으며, 표본 수가 적은 {region_group_label}은 결과가 왜곡될 수 있습니다.",
     ]
 
-    table_lines = ["| 자치구 | 거래건수 | 가격변동률(전월 대비) |", "|---|---:|---:|"]
+    table_lines = [f"| {region_group_label} | 거래건수 | 가격변동률(전월 대비) |", "|---|---:|---:|"]
     for _, row in vp_df.iterrows():
         table_lines.append(f"| {row['구명']} | {int(row['거래건수'])} | {row['가격변동률']:+.1f}% |")
     table_md = "\n".join(table_lines)
@@ -625,22 +681,22 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
 
     body = f"""
 공공데이터포털의 국토교통부 아파트 전월세 실거래자료를 파이썬으로 직접 수집·분석해
-{year}년 {month}월 {REGION_LABEL} 아파트 순수 전세 거래량과 가격 변동률 사이의 관계를 살펴봤습니다.
+{year}년 {month}월 {region_label} 아파트 순수 전세 거래량과 가격 변동률 사이의 관계를 살펴봤습니다.
 
 ## 분석 방법
 
 - 데이터 출처: [국토교통부 아파트 전월세 실거래자료]({DATA_SOURCE_URL}) (공공데이터포털 Open API)
-- 분석 대상: {REGION_LABEL} 25개 자치구, {year}년 {month}월 신고 기준 순수 전세 계약
+- 분석 대상: {region_label} {group_count_desc}, {year}년 {month}월 신고 기준 순수 전세 계약
 - 비교 기준월: {prev_ymd[:4]}년 {int(prev_ymd[4:])}월 (전월 대비 가격 변동률 계산용)
-- 가격 변동률은 자치구별 평균 전세보증금 기준이며, 거래건수는 순수 전세 계약 건수 기준입니다.
+- 가격 변동률은 {region_group_label}별 평균 전세보증금 기준이며, 거래건수는 순수 전세 계약 건수 기준입니다.
 
-## {title} · 자치구별 거래건수와 가격 변동률
+## {title} · {region_group_label}별 거래건수와 가격 변동률
 
-![{year}년 {month}월 {REGION_LABEL} 자치구별 순수 전세 거래건수](chart.png)
+![{year}년 {month}월 {region_label} {region_group_label}별 순수 전세 거래건수](chart.png)
 
 {table_md}
 
-## {title} · 자치구별 인사이트
+## {title} · {region_group_label}별 인사이트
 
 {insight_lines}
 """
@@ -653,14 +709,14 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
     chart.district_bar_chart(
         vp_df,
         post_dir / "chart.png",
-        title=f"{month_label} {REGION_LABEL} 자치구별 순수 전세 거래건수",
+        title=f"{month_label} {region_label} {region_group_label}별 순수 전세 거래건수",
         mean_col="거래건수",
         unit_divisor=1.0,
         unit_name="건",
     )
 
     body = maybe_add_promo(body)
-    summary = f"{month_label} {REGION_LABEL} 아파트 순수 전세 거래량-가격 변동 관계 분석"
+    summary = f"{month_label} {region_label} 아파트 순수 전세 거래량-가격 변동 관계 분석"
     write_post(post_dir, title, VOLUME_PRICE_TAGS, summary, body)
 
     return {
@@ -673,14 +729,29 @@ def try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd: str, prev_ymd: str
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="서울 아파트 전월세 동향 글 자동 생성")
+    parser = argparse.ArgumentParser(description="전국 지역별 아파트 전월세 동향 글 자동 생성")
     parser.add_argument("--month", help="YYYYMM 형식. 생략하면 지난달 사용", default=None)
+    parser.add_argument(
+        "--region",
+        choices=sorted(REGIONS.keys()),
+        default=None,
+        help="분석할 지역 키. 생략하면 이번 주 로테이션(REGION_ROTATION)에서 자동 선택",
+    )
     parser.add_argument("--mock", action="store_true", help="API 키 없이 가짜 데이터로 파이프라인만 검증")
     args = parser.parse_args()
 
     dataset = DATASETS[DATASET_KEY]
     deal_ymd = resolve_month(args.month)
     prev_ymd = month_before(deal_ymd)
+
+    region_key = args.region or pick_region_for_week()
+    region_info = REGIONS[region_key]
+    if not region_info["districts"]:
+        print(f"'{region_key}' 지역은 아직 districts가 채워지지 않았습니다.", file=sys.stderr)
+        sys.exit(1)
+    region_label = region_info["label"]
+    region_group_label = region_info["group_label"]
+    districts = region_info["districts"]
 
     api_key = ApiKey.from_env()
     if not args.mock and not api_key.is_configured():
@@ -695,12 +766,12 @@ def main() -> None:
 
     def get_df_all(ymd: str):
         if ymd not in frames_cache:
-            print(f"  ({ymd} {REGION_LABEL} {dataset['label']} 데이터 수집 중...)")
-            rows = fetch_month_rows(dataset["operation"], ymd, api_key, args.mock)
+            print(f"  ({ymd} {region_label} {dataset['label']} 데이터 수집 중...)")
+            rows = fetch_month_rows(dataset["operation"], ymd, api_key, args.mock, districts)
             frames_cache[ymd] = analyze.to_dataframe(rows)
         return frames_cache[ymd]
 
-    print(f"[1/4] {deal_ymd} / {prev_ymd} {REGION_LABEL} {dataset['label']} 데이터 수집 중...")
+    print(f"[1/4] {deal_ymd} / {prev_ymd} {region_label} {dataset['label']} 데이터 수집 중...")
     this_df_all = get_df_all(deal_ymd)
     prev_df_all = get_df_all(prev_ymd)  # 대부분의 후보 주제가 전월 데이터를 필요로 함
     print(f"[2/4] 데이터 정제 완료 (이번달 {len(this_df_all)}건, 전월 {len(prev_df_all)}건)")
@@ -712,14 +783,18 @@ def main() -> None:
     for topic in ordered_topics:
         try:
             if topic["id"] == VOLUME_PRICE_TOPIC_ID:
-                result = try_volumeprice_topic(this_df_all, prev_df_all, deal_ymd, prev_ymd)
+                result = try_volumeprice_topic(
+                    region_key, region_label, region_group_label, this_df_all, prev_df_all, deal_ymd, prev_ymd
+                )
             else:
                 if topic.get("compare") == "yoy":
                     reference_ymd = month_year_before(deal_ymd)
                 else:
                     reference_ymd = prev_ymd
                 reference_df_all = get_df_all(reference_ymd)
-                result = try_topic(topic, this_df_all, reference_df_all, deal_ymd, reference_ymd)
+                result = try_topic(
+                    topic, region_key, region_label, region_group_label, this_df_all, reference_df_all, deal_ymd, reference_ymd
+                )
         except TopicSkipped as exc:
             print(f"  건너뜀: {exc}")
             skip_reasons.append(str(exc))
@@ -729,7 +804,7 @@ def main() -> None:
         print("::post-meta::" + json.dumps(result, ensure_ascii=False))
         return
 
-    print("오늘 발행할 만한 주제가 없습니다 (모든 후보가 데이터/품질 기준 미달):")
+    print(f"오늘({region_label})은 발행할 만한 주제가 없습니다 (모든 후보가 데이터/품질 기준 미달):")
     for reason in skip_reasons:
         print(f"  - {reason}")
     sys.exit(0)
