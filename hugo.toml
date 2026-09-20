@@ -1,10 +1,10 @@
 baseURL = 'https://skylove-96.github.io/'
 languageCode = 'ko-kr'
-title = '오늘의 부동산'
+title = '부동산 데이터 랩'
 theme = 'PaperMod'
 
 [params]
-  description = "매일 아침 전해드리는 핵심 부동산 정보"
+  description = "공공데이터를 직접 분석해 부동산 시장의 흐름을 전해드립니다."
   author = "skylove-96"
   ShowReadingTime = true
   ShowShareButtons = true
@@ -13,8 +13,8 @@ theme = 'PaperMod'
   ShowCodeCopyButtons = true
 
   [params.homeInfoParams]
-    Title = "🏢 오늘의 부동산"
-    Content = "환영합니다! 매일 아침 업데이트되는 부동산 뉴스와 핵심 상식을 전해드립니다."
+    Title = "📊 부동산 데이터 랩"
+    Content = "공공데이터를 직접 분석해 부동산 시장의 흐름을 전해드립니다. 매주 월·수·금 업데이트됩니다."
 
 [menu]
   [[menu.main]]
