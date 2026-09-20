@@ -4,6 +4,10 @@ on:
   push:
     branches: ["main"]
   workflow_dispatch:
+  schedule:
+    # 매일 한국시간(KST, UTC+9) 자정 = UTC 15:00. 예약 발행일이 된 미래 날짜 글이
+    # push 없이도 그 날부터 바로 노출되도록 매일 재빌드한다.
+    - cron: "0 15 * * *"
 
 permissions:
   contents: read
