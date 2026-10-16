@@ -97,6 +97,7 @@ TOPICS = [
         "deal_desc": "순수 전세",
         "exclude_desc": "월세를 낀 반전세/월세 계약은 제외",
         "title_template": "{year}년 {month}월 {region} 아파트 전세가 동향",
+        "heading": "전세가 동향 인사이트",
         "tags": ["아파트", "전세", "실거래가"],
     },
     {
@@ -109,6 +110,7 @@ TOPICS = [
         "deal_desc": "월세(반전세 포함)",
         "exclude_desc": "순수 전세 계약은 제외",
         "title_template": "{year}년 {month}월 {region} 아파트 월세 시장 동향",
+        "heading": "월세 시장 인사이트",
         "tags": ["아파트", "월세", "실거래가"],
     },
     {
@@ -125,6 +127,7 @@ TOPICS = [
             "전환율이 0% 이하이거나 30%를 넘는 이상치는 제외"
         ),
         "title_template": "{year}년 {month}월 {region} 아파트 전월세 전환율 분석",
+        "heading": "전월세 전환율 인사이트",
         "tags": ["아파트", "전월세전환율", "실거래가"],
         "method_note": (
             "전월세 전환율은 실제 시세 대신 같은 자치구·같은 달의 순수 전세 평균 보증금을 "
@@ -141,6 +144,7 @@ TOPICS = [
         "deal_desc": "순수 전세",
         "exclude_desc": "월세를 낀 반전세/월세 계약은 제외",
         "title_template": "{year}년 {month}월 {region} 아파트 평형대별 전세가 분석",
+        "heading": "평형대별 전세가 인사이트",
         "tags": ["아파트", "평형대", "전세", "실거래가"],
         "group_col": "평형대",
         "group_count_desc": f"{len(analyze.AREA_BANDS)}개 평형대 구간",
@@ -156,6 +160,7 @@ TOPICS = [
         "deal_desc": "순수 전세",
         "exclude_desc": "월세를 낀 반전세/월세 계약은 제외",
         "title_template": "{year}년 {month}월 {region} 아파트 전세가, 1년 전과 비교하면",
+        "heading": "전세가 1년 전 대비 인사이트",
         "tags": ["아파트", "전세", "전년동월비교", "실거래가"],
         "compare": "yoy",
         "compare_label": "전년 동월",
@@ -409,19 +414,92 @@ def fetch_month_rows(
     return [molit_api.normalize_rent_row(row) for row in raw_rows]
 
 
+# 그룹별 증감을 표/인사이트에 쓸 때, 두 달 중 한쪽이라도 거래가 이보다 적으면
+# 몇 건의 계약만으로 증감률이 크게 튀므로 "-"로 표시하고 인사이트 비교에서도 뺀다.
+MIN_GROUP_COMPARE_COUNT = 10
+
+DATA_REVISION_NOTE = (
+    "데이터 수집 기준일: {date}. 이후 늦게 신고된 계약이 반영되면 같은 달을 다룬 "
+    "다른 글과 수치가 조금 다를 수 있습니다."
+)
+
+
+def collected_on() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def josa_gwa_wa(word: str) -> str:
+    return "과" if analyze._has_batchim(word) else "와"
+
+
+def format_change(this_value: float, ref_value: float, unit_name: str) -> str:
+    """증감을 표기한다. 비율(%) 지표는 증감률의 증감률이 되지 않도록 %p 차이로 쓴다."""
+    if unit_name == "%":
+        return f"{this_value - ref_value:+.2f}%p"
+    return f"{(this_value - ref_value) / ref_value * 100:+.1f}%"
+
+
+def add_group_change(group_summary, reference_summary, group_col: str, mean_col: str):
+    """group_summary에 비교 기준월의 평균/거래건수를 붙인다 (기준월에 없는 그룹은 NaN)."""
+    ref = reference_summary[[group_col, mean_col, "거래건수"]].rename(
+        columns={mean_col: "기준 평균", "거래건수": "기준 거래건수"}
+    )
+    return group_summary.merge(ref, on=group_col, how="left")
+
+
+def is_comparable(row) -> bool:
+    ref_count = row["기준 거래건수"]
+    return (
+        row["거래건수"] >= MIN_GROUP_COMPARE_COUNT
+        and ref_count == ref_count  # NaN 제외
+        and ref_count >= MIN_GROUP_COMPARE_COUNT
+        and row["기준 평균"] > 0
+    )
+
+
+def group_change_insight(
+    group_summary, group_col: str, mean_col: str, unit_name: str, compare_label: str, group_noun: str
+) -> str | None:
+    if group_summary.empty:
+        return None
+    comparable = group_summary[group_summary.apply(is_comparable, axis=1)]
+    if len(comparable) < 2:
+        return None
+    if unit_name == "%":
+        change = comparable[mean_col] - comparable["기준 평균"]
+    else:
+        change = (comparable[mean_col] - comparable["기준 평균"]) / comparable["기준 평균"]
+    top, bottom = comparable.loc[change.idxmax()], comparable.loc[change.idxmin()]
+    top_desc = "가장 많이 오른" if change.max() > 0 else "가장 적게 내린"
+    bottom_desc = "가장 많이 내린" if change.min() < 0 else "가장 적게 오른"
+    return (
+        f"{compare_label} 대비 평균이 {top_desc} {group_noun}은 {top[group_col]}"
+        f"({format_change(top[mean_col], top['기준 평균'], unit_name)}), {bottom_desc} {group_noun}은 "
+        f"{bottom[group_col]}({format_change(bottom[mean_col], bottom['기준 평균'], unit_name)})이었습니다 "
+        f"(두 달 모두 {MIN_GROUP_COMPARE_COUNT}건 이상 거래된 {group_noun}만 비교)."
+    )
+
+
 def group_table_markdown(
     group_summary,
     mean_col: str,
     median_col: str,
     unit_divisor: float,
+    unit_name: str,
     group_col: str,
     group_header: str,
+    compare_label: str,
 ) -> str:
-    lines = [f"| {group_header} | {mean_col} | {median_col} | 거래건수 |", "|---|---:|---:|---:|"]
+    """단위를 헤더에 적고, 비교 기준월 대비 평균 증감 열을 함께 보여준다."""
+    lines = [
+        f"| {group_header} | {mean_col}({unit_name}) | {median_col}({unit_name}) | {compare_label} 대비 | 거래건수 |",
+        "|---|---:|---:|---:|---:|",
+    ]
     for _, row in group_summary.iterrows():
+        change = format_change(row[mean_col], row["기준 평균"], unit_name) if is_comparable(row) else "-"
         lines.append(
             f"| {row[group_col]} | {row[mean_col] / unit_divisor:.1f} | "
-            f"{row[median_col] / unit_divisor:.1f} | {int(row['거래건수'])} |"
+            f"{row[median_col] / unit_divisor:.1f} | {change} | {int(row['거래건수']):,} |"
         )
     return "\n".join(lines)
 
@@ -442,18 +520,18 @@ def build_body(
 ) -> str:
     """본문 마크다운을 만든다.
 
-    표/인사이트 소제목은 그냥 "{group_header}별 인사이트" 식으로 두면, 같은 달에
-    같은 그룹 기준(예: 자치구)을 쓰는 다른 주제(전세/전년비교 등)와 소제목이
-    그대로 겹친다. 이미 대상+시점+관점을 담고 있고(dedupe_title_and_slug에서
-    같은 달 중복까지 걸러진) 글 제목(title)을 소제목 앞에 그대로 붙여, 소제목도
-    같은 구체성/유일성을 물려받도록 한다.
+    소제목에 글 제목 전체를 붙이면 너무 길어지므로, 지역·그룹·지표·비교 기준
+    (전월/전년 동월)과 주제별 heading만 넣는다. 같은 그룹 기준을 쓰는 주제끼리도
+    (예: 전세 vs 전년비교) 비교 기준이나 heading이 달라 소제목이 겹치지 않는다.
     """
     year, month = deal_ymd[:4], int(deal_ymd[4:])
     ref_year, ref_month = reference_ymd[:4], int(reference_ymd[4:])
     mean_col = f"평균 {topic['out_prefix']}"
     median_col = f"중위 {topic['out_prefix']}"
     insight_lines = "\n".join(f"- {line}" for line in insights)
-    table_md = group_table_markdown(group_summary, mean_col, median_col, topic["unit_divisor"], group_col, group_header)
+    table_md = group_table_markdown(
+        group_summary, mean_col, median_col, topic["unit_divisor"], topic["unit_name"], group_col, group_header, compare_label
+    )
     method_note = f"\n- {topic['method_note']}" if topic.get("method_note") else ""
 
     return f"""
@@ -465,15 +543,16 @@ def build_body(
 - 데이터 출처: [국토교통부 아파트 전월세 실거래자료]({DATA_SOURCE_URL}) (공공데이터포털 Open API)
 - 분석 대상: {region_label} {group_count_desc}, {year}년 {month}월 신고 기준 {topic['deal_desc']} 계약
 - 비교 기준월: {ref_year}년 {ref_month}월 ({compare_label} 대비 증감률 계산용)
-- 실거래 신고는 계약 후 30일 이내에 이루어지므로, 최근월 데이터는 이후 계속 소폭 갱신될 수 있습니다.{method_note}
+- 실거래 신고는 계약 후 30일 이내에 이루어지므로, 최근월 데이터는 이후 계속 소폭 갱신될 수 있습니다.
+- {DATA_REVISION_NOTE.format(date=collected_on())}{method_note}
 
-## {title} · {group_header}별 {mean_col}
+## {region_label} {group_header}별 {mean_col}{josa_gwa_wa(mean_col)} {compare_label} 대비 변화
 
 ![{year}년 {month}월 {region_label} {group_header}별 {mean_col}](chart.png)
 
 {table_md}
 
-## {title} · {group_header}별 인사이트
+## {region_label} {month}월 {topic['heading']}
 
 {insight_lines}
 """
@@ -534,9 +613,13 @@ def try_topic(
             f"[{topic['id']}] 거래건수 부족: {len(this_df)}건 < 최소 {MIN_TRANSACTIONS}건"
         )
 
-    group_summary = analyze.summarize_by_group(
-        this_df, group_col, topic["value_col"], topic["out_prefix"], round_ndigits=topic.get("round_ndigits", 0)
+    mean_col = f"평균 {topic['out_prefix']}"
+    round_ndigits = topic.get("round_ndigits", 0)
+    group_summary = analyze.summarize_by_group(this_df, group_col, topic["value_col"], topic["out_prefix"], round_ndigits)
+    reference_summary = analyze.summarize_by_group(
+        reference_df, group_col, topic["value_col"], topic["out_prefix"], round_ndigits
     )
+    group_summary = add_group_change(group_summary, reference_summary, group_col, mean_col)
     month_label = f"{deal_ymd[:4]}년 {int(deal_ymd[4:])}월"
     insights = analyze.build_insights(
         this_df,
@@ -555,6 +638,9 @@ def try_topic(
         group_noun=group_noun,
         compare_label=compare_label,
     )
+    change_line = group_change_insight(group_summary, group_col, mean_col, topic["unit_name"], compare_label, group_noun)
+    if change_line:
+        insights.insert(len(insights) - 1, change_line)  # 마지막 "총 N건" 문장 앞에 넣는다
 
     year, month = deal_ymd[:4], int(deal_ymd[4:])
     title = topic["title_template"].format(year=year, month=month, region=region_label)
@@ -603,7 +689,19 @@ def try_topic(
     )
 
     body = maybe_add_promo(body)
-    summary = f"{month_label} {region_label} 아파트 {topic['deal_desc']} 실거래 데이터 분석"
+    # summary는 목록/검색 결과에서 같은 달·같은 지역 글끼리 구분되도록 이 글의 핵심 수치를 담는다.
+    unit_name, unit_divisor = topic["unit_name"], topic["unit_divisor"]
+    this_avg = this_df[topic["value_col"]].mean()
+    ref_avg = reference_df[topic["value_col"]].mean() if not reference_df.empty else 0
+    summary = (
+        f"{month_label} {region_label} 아파트 {topic['deal_desc']} {len(this_df):,}건 분석: "
+        f"평균 {this_avg / unit_divisor:.1f}{unit_name}"
+    )
+    if ref_avg:
+        summary += f"({compare_label} 대비 {format_change(this_avg, ref_avg, unit_name)})"
+    if not group_summary.empty:
+        top = group_summary.iloc[0]
+        summary += f", {group_header}별 최고는 {top[group_col]}({top[mean_col] / unit_divisor:.1f}{unit_name})"
     write_post(post_dir, title, topic["tags"], summary, body)
 
     return {
@@ -678,7 +776,7 @@ def try_volumeprice_topic(
 
     table_lines = [f"| {region_group_label} | 거래건수 | 가격변동률(전월 대비) |", "|---|---:|---:|"]
     for _, row in vp_df.iterrows():
-        table_lines.append(f"| {row['구명']} | {int(row['거래건수'])} | {row['가격변동률']:+.1f}% |")
+        table_lines.append(f"| {row['구명']} | {int(row['거래건수']):,} | {row['가격변동률']:+.1f}% |")
     table_md = "\n".join(table_lines)
     insight_lines = "\n".join(f"- {line}" for line in insights)
 
@@ -692,14 +790,15 @@ def try_volumeprice_topic(
 - 분석 대상: {region_label} {group_count_desc}, {year}년 {month}월 신고 기준 순수 전세 계약
 - 비교 기준월: {prev_ymd[:4]}년 {int(prev_ymd[4:])}월 (전월 대비 가격 변동률 계산용)
 - 가격 변동률은 {region_group_label}별 평균 전세보증금 기준이며, 거래건수는 순수 전세 계약 건수 기준입니다.
+- {DATA_REVISION_NOTE.format(date=collected_on())}
 
-## {title} · {region_group_label}별 거래건수와 가격 변동률
+## {region_label} {region_group_label}별 거래건수와 가격 변동률
 
 ![{year}년 {month}월 {region_label} {region_group_label}별 순수 전세 거래건수](chart.png)
 
 {table_md}
 
-## {title} · {region_group_label}별 인사이트
+## {region_label} {month}월 전세 거래량-가격 인사이트
 
 {insight_lines}
 """
@@ -719,7 +818,12 @@ def try_volumeprice_topic(
     )
 
     body = maybe_add_promo(body)
-    summary = f"{month_label} {region_label} 아파트 순수 전세 거래량-가격 변동 관계 분석"
+    corr_summary = f", 상관계수 {corr:.2f}" if corr is not None else ""
+    summary = (
+        f"{month_label} {region_label} 아파트 순수 전세 {total_contracts:,}건으로 본 거래량-가격 관계: "
+        f"거래 최다 {most_traded['구명']}({int(most_traded['거래건수']):,}건), "
+        f"최대 상승 {biggest_gain['구명']}({biggest_gain['가격변동률']:+.1f}%){corr_summary}"
+    )
     write_post(post_dir, title, VOLUME_PRICE_TAGS, summary, body)
 
     return {
