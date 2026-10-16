@@ -6,6 +6,7 @@ DATA_GO_KR_ENCODING_KEY 로 넣어두면 이 모듈이 알아서 인증해서 �
 from __future__ import annotations
 
 import os
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -64,7 +65,11 @@ def _parse_response(xml_text: str) -> Tuple[List[Dict[str, str]], int]:
     아파트/연립다세대/오피스텔, 매매/전월세마다 필드 구성이 조금씩 달라서
     스키마를 하드코딩하지 않고 자식 태그를 그대로 읽어들인다.
     """
-    root = ET.fromstring(xml_text)
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        # 점검/장애 시 공공데이터포털이 XML 대신 HTML 안내 페이지를 돌려주는 경우가 있다.
+        raise MolitApiError(f"API 응답을 XML로 해석할 수 없습니다 (서버 점검/장애 가능성): {exc}") from exc
 
     result_code_el = root.find("./header/resultCode")
     result_msg_el = root.find("./header/resultMsg")
@@ -93,8 +98,8 @@ def _request_page(
     url: str,
     common_params: Dict[str, str],
     api_key: ApiKey,
-    timeout: int,
-    max_retries: int = 4,
+    timeout: Tuple[int, int],
+    max_retries: int = 6,
 ) -> requests.Response:
     last_error: Exception | None = None
     for attempt in range(max_retries):
@@ -114,8 +119,11 @@ def _request_page(
         except requests.exceptions.RequestException as exc:
             last_error = exc
             if attempt < max_retries - 1:
-                time.sleep(2**attempt)  # 공공데이터포털 서버 응답 지연 대응 (1s, 2s, 4s ...)
-    raise MolitApiError(f"API 호출이 {max_retries}회 재시도 후에도 실패했습니다: {last_error}")
+                # 공공데이터포털 서버 응답 지연/일시 장애 대응 (2s, 4s, 8s, 16s, 30s)
+                time.sleep(min(2 ** (attempt + 1), 30))
+    # 예외 메시지에 요청 URL(서비스키 포함)이 들어가므로, 로그/Issue로 새지 않게 가린다.
+    safe_error = re.sub(r"serviceKey=[^&\s]+", "serviceKey=***", str(last_error))
+    raise MolitApiError(f"API 호출이 {max_retries}회 재시도 후에도 실패했습니다: {safe_error}")
 
 
 def fetch_district_month(
@@ -124,7 +132,7 @@ def fetch_district_month(
     deal_ymd: str,
     api_key: ApiKey,
     num_rows: int = NUM_ROWS_PER_DISTRICT,
-    timeout: int = 30,
+    timeout: Tuple[int, int] = (10, 30),  # (접속, 응답) 초. 접속이 안 되는 장애는 빨리 재시도한다.
 ) -> List[Dict[str, str]]:
     """구(LAWD_CD) 하나, 월(YYYYMM) 하나에 대한 실거래 목록을 페이지네이션까지 처리해 모두 가져온다."""
     if not api_key.is_configured():

@@ -9,6 +9,9 @@
      해당 주제를 건너뛰고 다음 후보로 넘어감
   4. 표/차트 생성 자체가 실패하면(코드/환경 문제) 다른 주제로 넘어가지 않고 즉시 중단
   5. 성공하면 stdout에 `::post-meta::{...}` 한 줄을 출력해 CI가 PR 정보를 읽어가게 함
+  6. 공공데이터 API 호출이 끝내 실패하면 종료 코드 3으로 끝냄 (CI가 잠시 후 전체 재시도)
+
+종료 코드: 0 = 글 생성 또는 "발행할 주제 없음", 1 = 설정/코드 오류, 3 = 공공데이터 API 오류
 
 사용 예:
     python generate_post.py                 # 지난달 데이터, 실제 API, 이번 주 로테이션 지역 자동 선택
@@ -728,6 +731,9 @@ def try_volumeprice_topic(
     }
 
 
+EXIT_API_ERROR = 3  # CI(generate-post.yml)가 이 코드일 때만 잠시 기다렸다가 다시 시도한다.
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="전국 지역별 아파트 전월세 동향 글 자동 생성")
     parser.add_argument("--month", help="YYYYMM 형식. 생략하면 지난달 사용", default=None)
@@ -772,8 +778,12 @@ def main() -> None:
         return frames_cache[ymd]
 
     print(f"[1/4] {deal_ymd} / {prev_ymd} {region_label} {dataset['label']} 데이터 수집 중...")
-    this_df_all = get_df_all(deal_ymd)
-    prev_df_all = get_df_all(prev_ymd)  # 대부분의 후보 주제가 전월 데이터를 필요로 함
+    try:
+        this_df_all = get_df_all(deal_ymd)
+        prev_df_all = get_df_all(prev_ymd)  # 대부분의 후보 주제가 전월 데이터를 필요로 함
+    except molit_api.MolitApiError as exc:
+        print(f"공공데이터 API 오류로 데이터를 수집하지 못했습니다: {exc}", file=sys.stderr)
+        sys.exit(EXIT_API_ERROR)
     print(f"[2/4] 데이터 정제 완료 (이번달 {len(this_df_all)}건, 전월 {len(prev_df_all)}건)")
 
     ordered_topics = order_topics_by_recency(CANDIDATE_TOPICS)
@@ -791,7 +801,11 @@ def main() -> None:
                     reference_ymd = month_year_before(deal_ymd)
                 else:
                     reference_ymd = prev_ymd
-                reference_df_all = get_df_all(reference_ymd)
+                try:
+                    reference_df_all = get_df_all(reference_ymd)
+                except molit_api.MolitApiError as exc:
+                    print(f"공공데이터 API 오류로 데이터를 수집하지 못했습니다: {exc}", file=sys.stderr)
+                    sys.exit(EXIT_API_ERROR)
                 result = try_topic(
                     topic, region_key, region_label, region_group_label, this_df_all, reference_df_all, deal_ymd, reference_ymd
                 )
