@@ -207,6 +207,25 @@ SLUG_SUFFIX_LETTERS = "bcdefghijklmnopqrstuvwxyz"
 TITLE_SIMILARITY_THRESHOLD = 0.85
 
 
+# --replace로 이미 발행된 글을 같은 주소에 다시 생성할 때의 정보 (main에서 채움).
+# 주소(slug)·최초 발행일·홍보 문구 유무는 원래 글 그대로 두고, 정정 안내와 lastmod만 더한다.
+REPLACE: dict | None = None
+
+
+def load_replace_target(slug: str, note: str) -> dict:
+    """정정 대상 글의 최초 발행일과 홍보 문구(있었다면 원문 그대로)를 읽어 둔다."""
+    index_md = CONTENT_POSTS_DIR / slug / "index.md"
+    if not index_md.exists():
+        raise SystemExit(f"--replace 대상 글이 없습니다: content/posts/{slug}/index.md")
+    text = index_md.read_text(encoding="utf-8")
+    date_match = DATE_RE.search(text)
+    promo = None
+    promo_at = text.find(PROMO_MARKER)
+    if promo_at != -1:
+        promo = text[promo_at:].strip()  # maybe_add_promo가 "---" 구분선 뒤에 붙인 부분
+    return {"slug": slug, "date": date_match.group(1) if date_match else None, "promo": promo, "note": note}
+
+
 class TopicSkipped(Exception):
     """데이터가 너무 적거나 본문이 너무 짧아 이 주제를 건너뛸 때 발생 (다음 후보 시도)."""
 
@@ -378,6 +397,8 @@ def dedupe_title_and_slug(
     슬러그도 같은 시도 순번의 접미사를 붙여 제목과 일관되게 유지한다
     (post/날짜-slug 브랜치 규칙은 그대로 유지됨).
     """
+    if REPLACE and base_slug == REPLACE["slug"]:
+        return base_title, base_slug  # 정정은 원래 주소에 덮어쓰므로 자기 자신과 비교하지 않는다.
     existing = existing_month_titles(region_key, deal_ymd)
     existing_titles = [t for _, t in existing]
     existing_slugs = {s for s, _ in existing}
@@ -586,11 +607,15 @@ def build_body(
 
 
 def write_post(post_dir: Path, title: str, tags: list[str], summary: str, body: str) -> None:
-    now = datetime.now(KST)
+    now = datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    dates = f"date: {now}\n"
+    if REPLACE:
+        dates = f"date: {REPLACE['date'] or now}\nlastmod: {now}\n"
+        body = f"> **정정 안내 ({now[:10]})**: {REPLACE['note']}\n\n{body.lstrip()}"
     front_matter = (
         "---\n"
         f'title: "{title}"\n'
-        f"date: {now.strftime('%Y-%m-%dT%H:%M:%S+09:00')}\n"
+        f"{dates}"
         "draft: false\n"
         f"tags: {json.dumps(tags, ensure_ascii=False)}\n"
         f'categories: ["{CATEGORY_LABEL}"]\n'
@@ -602,6 +627,8 @@ def write_post(post_dir: Path, title: str, tags: list[str], summary: str, body: 
 
 
 def maybe_add_promo(body: str) -> str:
+    if REPLACE:  # 정정본은 원래 글의 홍보 문구 유무를 그대로 따른다.
+        return f"{body}\n---\n\n{REPLACE['promo']}\n" if REPLACE["promo"] else body
     if recent_posts_have_promo(PROMO_MIN_GAP):
         return body
     if random.random() < PROMO_PROBABILITY:
@@ -1014,8 +1041,27 @@ def main() -> None:
         action="store_true",
         help="글은 만들지 않고 지역 코드 건강 점검 결과만 출력 (--region 생략 시 로테이션 전체, regions.json은 바꾸지 않음)",
     )
+    parser.add_argument(
+        "--topic",
+        choices=[t["id"] for t in CANDIDATE_TOPICS],
+        default=None,
+        help="이 주제만 시도 (생략하면 최근에 덜 쓴 주제부터 자동 선택)",
+    )
+    parser.add_argument(
+        "--replace",
+        metavar="NOTE",
+        default=None,
+        help="이미 발행된 {region}-apt-{topic}-{month} 글을 같은 주소에 다시 생성하고 맨 위에 NOTE를 정정 안내로 붙임 "
+        "(--region/--topic/--month 필요. 최초 발행일·홍보 문구 유무는 유지, 다른 지역으로 대체하지 않음)",
+    )
     parser.add_argument("--mock", action="store_true", help="API 키 없이 가짜 데이터로 파이프라인만 검증")
     args = parser.parse_args()
+    if args.replace:
+        if not (args.region and args.topic and args.month):
+            parser.error("--replace는 --region, --topic, --month와 함께 써야 합니다.")
+        global REPLACE
+        REPLACE = load_replace_target(f"{args.region}-apt-{args.topic}-{args.month}", args.replace)
+        args.no_fallback = True  # 정정 대상 지역이 아닌 다른 지역 글로 덮어쓰면 안 된다.
 
     dataset = DATASETS[DATASET_KEY]
     deal_ymd = resolve_month(args.month)
@@ -1088,7 +1134,10 @@ def main() -> None:
     this_df_all, prev_df_all = get_frame(deal_ymd)[0], get_frame(prev_ymd)[0]
     print(f"[2/4] 데이터 정제 완료 ({region_label}: 이번달 {len(this_df_all)}건, 전월 {len(prev_df_all)}건)")
 
-    ordered_topics = order_topics_by_recency(CANDIDATE_TOPICS)
+    if args.topic:
+        ordered_topics = [t for t in CANDIDATE_TOPICS if t["id"] == args.topic]
+    else:
+        ordered_topics = order_topics_by_recency(CANDIDATE_TOPICS)
     print(f"[3/4] 후보 주제 시도 순서: {[t['id'] for t in ordered_topics]}")
 
     skip_reasons: list[str] = []
