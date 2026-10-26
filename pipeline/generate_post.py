@@ -971,7 +971,11 @@ def write_health_report(reports: list[region_cfg.HealthReport], chosen: str | No
         return
     lines = ["## 지역 코드 건강 점검 결과", ""]
     for r in reports:
-        applied = " (새 코드 자동 반영 — 글 PR의 regions.json 변경을 확인해주세요)" if r.auto_applied else ""
+        applied = (
+            " (새 코드 자동 반영 — 글이 생성되면 그 PR에 regions.json 변경이 함께 올라가니 확인해주세요. "
+            "표기(label)는 바꾸지 않았습니다)"
+            if r.auto_applied else ""
+        )
         lines.append(f"- {r.summary_line()}{applied}")
     lines.append("")
     if chosen:

@@ -2,7 +2,11 @@
 
 - regions.json에 있는 코드가 폐지됐거나 자료에 없으면 → "폐지" (그대로 두면 글에서 그 구가 빠짐)
 - 각 지역의 시/도(sido_codes) 안에서 codes_verified_on 이후 생성된 코드 → "신설" (추가 검토 대상)
-- 전국에서 최근(--days, 기본 62일) 생성·폐지된 코드 → 참고용 (새 시/도 통합처럼 sido_codes 밖의 변화)
+- 시/도 목록이 regions.json의 known_sido_codes와 다르면 → "시/도 신설·폐지" (예: 2026-07 전남광주통합특별시)
+- 조회한 시/도에서 최근(--days, 기본 62일) 생성·폐지된 코드 → 참고용
+
+code.go.kr 조회는 시/군/구마다 1번씩이라 GitHub 러너에서 전국을 돌면 30분 가까이 걸린다.
+그래서 기본은 regions.json에 쓰인 시/도만 자세히 보고, 전국은 --all-sidos로 따로 돌린다.
 
 결과는 마크다운으로 출력하고, 변경이 있으면 region_codes_report.md를 남긴다 (CI가 Issue로 올림).
 서비스키가 필요 없다.
@@ -30,7 +34,8 @@ KST = ZoneInfo("Asia/Seoul")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="법정동코드 자료 ↔ regions.json 월간 비교")
-    parser.add_argument("--days", type=int, default=62, help="전국 참고 목록에 넣을 최근 변경 기간(일)")
+    parser.add_argument("--days", type=int, default=62, help="참고 목록에 넣을 최근 변경 기간(일)")
+    parser.add_argument("--all-sidos", action="store_true", help="regions.json에 없는 시/도까지 전국을 모두 조회")
     args = parser.parse_args()
 
     cfg = region_cfg.load_config()
@@ -39,8 +44,9 @@ def main() -> None:
 
     try:
         sidos = lawd_codes.list_sido()
+        targets = set(sidos) if args.all_sidos else {c for r in cfg["regions"].values() for c in r.get("sido_codes", [])}
         all_rows = {}
-        for sido_cd in sorted(sidos):
+        for sido_cd in sorted(targets & set(sidos)):
             for row in lawd_codes.list_sgg(sido_cd):
                 all_rows[row.lawd_cd] = row
     except lawd_codes.LawdCodeError as exc:
@@ -49,6 +55,23 @@ def main() -> None:
 
     problems: list[str] = []
     lines = [f"## 법정동코드 ↔ regions.json 월간 비교 ({today:%Y-%m-%d})", ""]
+    known = cfg.get("known_sido_codes", {})
+    added = {c: n for c, n in sidos.items() if c not in known}
+    removed = {c: n for c, n in known.items() if c not in sidos}
+    gone_targets = sorted(c for r in cfg["regions"].values() for c in r.get("sido_codes", []) if c not in sidos)
+    lines.append("### 시/도 목록 — " + ("변경 있음" if (added or removed or gone_targets) else "이상 없음"))
+    if added:
+        lines.append("- **신설(또는 새로 보이는) 시/도**: " + ", ".join(f"{c} {n}" for c, n in sorted(added.items())))
+        problems += [f"시/도 신설 {c} {n}" for c, n in added.items()]
+    if removed:
+        lines.append("- **목록에서 사라진 시/도**: " + ", ".join(f"{c} {n}" for c, n in sorted(removed.items())))
+        problems += [f"시/도 폐지 {c} {n}" for c, n in removed.items()]
+    if gone_targets:
+        lines.append("- **regions.json sido_codes 중 현존하지 않는 시/도**: " + ", ".join(gone_targets))
+        problems += [f"sido_codes 폐지 {c}" for c in gone_targets]
+    if added or removed:
+        lines.append("  확인 후 regions.json의 known_sido_codes도 갱신해주세요.")
+    lines.append("")
     for key, region in cfg["regions"].items():
         configured = {d["lawd_cd"]: d["name"] for d in region.get("districts", [])}
         verified = region.get("codes_verified_on", "2000-01-01").replace("-", "")
@@ -75,7 +98,8 @@ def main() -> None:
         (r for r in all_rows.values() if (r.created and r.created >= since) or (r.abolished and r.abolished >= since)),
         key=lambda r: r.lawd_cd,
     )
-    lines.append(f"### 참고: 전국 최근 {args.days}일 생성·폐지 ({since} 이후)")
+    scope = "전국" if args.all_sidos else "조회한 시/도"
+    lines.append(f"### 참고: {scope} 최근 {args.days}일 생성·폐지 ({since} 이후)")
     lines.append("")
     if recent:
         lines += ["| 코드 | 이름 | 생성일 | 폐지일 |", "|---|---|---|---|"]

@@ -8,3 +8,7 @@ resources/_gen/
 pipeline/__pycache__/
 pipeline/**/__pycache__/
 pipeline/.cache/
+
+# 지역 코드 점검 보고서 (CI가 Issue 본문으로만 사용)
+region_health_report.md
+region_codes_report.md
