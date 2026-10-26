@@ -1,26 +1,56 @@
-name: (임시) 지역 코드 API 진단
+name: (임시) 지역 코드 수정 전후 시뮬레이션
 on:
   push:
     branches: ["fix/region-codes"]
-    paths: [".github/workflows/diag-codes.yml", "pipeline/diagnose_codes.py"]
+    paths: [".github/workflows/diag-codes.yml"]
 permissions:
   contents: read
+env:
+  DATA_GO_KR_ENCODING_KEY: ${{ secrets.DATA_GO_KR_ENCODING_KEY }}
+  DATA_GO_KR_DECODING_KEY: ${{ secrets.DATA_GO_KR_DECODING_KEY }}
+  PYTHONUNBUFFERED: "1"
 jobs:
-  diag:
+  sim:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r pipeline/requirements.txt
-      - name: 광주 옛 코드(29xxx) vs 새 코드(12xxx)
-        env:
-          DATA_GO_KR_ENCODING_KEY: ${{ secrets.DATA_GO_KR_ENCODING_KEY }}
-          DATA_GO_KR_DECODING_KEY: ${{ secrets.DATA_GO_KR_DECODING_KEY }}
-        run: python pipeline/diagnose_codes.py --codes 29110,29140,29155,29170,29200,12210,12240,12270,12300,12330 --months 202609,202608,202607,202606,202509
-      - name: 인천 옛 코드 vs 개편 코드
-        env:
-          DATA_GO_KR_ENCODING_KEY: ${{ secrets.DATA_GO_KR_ENCODING_KEY }}
-          DATA_GO_KR_DECODING_KEY: ${{ secrets.DATA_GO_KR_DECODING_KEY }}
-        run: python pipeline/diagnose_codes.py --codes 28110,28140,28260,28125,28155,28275,28290,28177,28185,28200,28237,28245,28710,28720 --months 202609,202608,202607,202606,202509
+      - run: pip install -r pipeline/requirements.txt && sudo apt-get install -y fonts-nanum >/dev/null
+      - name: 0) GitHub 러너에서 code.go.kr 접속 확인
+        run: python -c "import sys; sys.path.insert(0,'pipeline'); from src import lawd_codes as L; print(L.list_sido())"
+      - name: 수정 전 설정 만들기 (main의 하드코딩 REGIONS)
+        run: |
+          git show origin/main:pipeline/config.py > /tmp/config_main.py
+          python - <<'PY'
+          import importlib.util, json
+          spec = importlib.util.spec_from_file_location("m", "/tmp/config_main.py"); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          sido = {"seoul": "11", "gyeonggi": "41", "incheon": "28", "busan": "26", "daegu": "27", "daejeon": "30", "gwangju": "29"}
+          cfg = {"rotation": m.REGION_ROTATION, "regions": {k: {"label": v["label"], "group_label": v["group_label"], "sido_codes": [sido[k]],
+                 "codes_verified_on": "2026-09-15", "districts": [{"name": n, "lawd_cd": c} for n, c in v["districts"].items()]} for k, v in m.REGIONS.items()}}
+          json.dump(cfg, open("/tmp/regions_before.json", "w", encoding="utf-8"), ensure_ascii=False)
+          PY
+      - name: 1) 수정 전 - 광주 건강 점검 (자동 탐색 포함, regions.json 미변경)
+        run: REGIONS_FILE=/tmp/regions_before.json python pipeline/generate_post.py --health-only --region gwangju --month 202609
+      - name: 2) 수정 전 - 인천 실제 실행 (코드 이상 → 로테이션 다음 지역으로 대체)
+        run: |
+          REGIONS_FILE=/tmp/regions_before.json python pipeline/generate_post.py --region incheon --month 202609
+          echo "----- region_health_report.md -----"; cat region_health_report.md || true
+          rm -f region_health_report.md; git clean -fdq content/
+      - name: 3) 수정 후 - 광주/인천 건강 점검
+        run: |
+          python pipeline/generate_post.py --health-only --region gwangju --month 202609
+          python pipeline/generate_post.py --health-only --region incheon --month 202609
+      - name: 4) 수정 후 - 오늘(10/26) 광주 글 실제 생성
+        run: |
+          python pipeline/generate_post.py --region gwangju --month 202609
+          ls region_health_report.md 2>/dev/null && echo "!!! 건강 점검 경고 발생" || echo "건강 점검 경고 없음"
+          for f in content/posts/gwangju-*/index.md; do echo "===== $f"; cat "$f"; done
+      - name: 5) 월간 점검 - 수정 전 설정 / 수정 후 설정
+        run: |
+          REGIONS_FILE=/tmp/regions_before.json python pipeline/check_region_codes.py | sed -n '1,30p'
+          echo "=================== 수정 후"
+          python pipeline/check_region_codes.py | sed -n '1,20p'

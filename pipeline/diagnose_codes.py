@@ -33,8 +33,8 @@ def region_codes(region_key: str) -> dict[str, str]:
     region = REGIONS[region_key]
     codes = {d["lawd_cd"]: f"현재 {d['name']}" for d in region["districts"]}
     for change in region.get("code_history", []):
-        for old in change["old_codes"]:
-            codes.setdefault(old["lawd_cd"], f"옛 {old['name']} (~{change['effective_date']} 폐지)")
+        for m in change["mapping"]:
+            codes.setdefault(m["old_lawd_cd"], f"옛 {m['old_name']} ({change['effective_date']} 폐지)")
     return codes
 
 

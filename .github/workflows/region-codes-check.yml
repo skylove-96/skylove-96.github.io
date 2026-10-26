@@ -1,0 +1,65 @@
+name: 지역 코드 월간 점검 (법정동코드 ↔ regions.json)
+
+# 매월 1일 한국시간(KST) 오전 9시 = UTC 00:00. 법정동코드 최신 자료와 regions.json을 비교해
+# 폐지·신설된 시/군/구 코드가 있으면 Issue로 알린다. 서비스키는 필요 없다.
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 파이썬 의존성 설치
+        run: pip install -r pipeline/requirements.txt
+
+      - name: 법정동코드 자료와 비교
+        id: check
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set +e
+          set -o pipefail
+          python pipeline/check_region_codes.py 2>&1 | tee check_output.log
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # 비교 결과는 Actions 요약 화면에서도 바로 볼 수 있게 남긴다.
+          cat check_output.log >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 변경이 있으면 Issue로 알림
+        if: always() && (hashFiles('region_codes_report.md') != '' || steps.check.outputs.exit_code != '0')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXIT_CODE: ${{ steps.check.outputs.exit_code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          KST_MONTH="$(date -u -d '+9 hours' +%Y-%m)"
+          if [ -f region_codes_report.md ]; then
+            TITLE="[지역 코드 변경] ${KST_MONTH} 법정동코드 폐지·신설 감지"
+            cp region_codes_report.md issue_body.md
+          else
+            TITLE="[지역 코드 점검 실패] ${KST_MONTH} 법정동코드 자료 조회 오류 (exit=${EXIT_CODE})"
+            { echo '```'; tail -n 30 check_output.log; echo '```'; } > issue_body.md
+          fi
+          echo -e "\n- 실행 로그: ${RUN_URL}" >> issue_body.md
+          gh label create region-code-change --color 1D76DB --description "법정동코드 폐지·신설 감지" 2>/dev/null || true
+          # 같은 달에 이미 같은 제목의 Issue가 열려 있으면 새로 만들지 않는다 (수동 재실행 대비).
+          if gh issue list --label region-code-change --state open --json title -q '.[].title' | grep -Fxq "$TITLE"; then
+            echo "이미 열린 Issue가 있어 새로 만들지 않습니다: $TITLE"
+            exit 0
+          fi
+          gh issue create --title "$TITLE" --body-file issue_body.md --label region-code-change \
+            || gh issue create --title "$TITLE" --body-file issue_body.md

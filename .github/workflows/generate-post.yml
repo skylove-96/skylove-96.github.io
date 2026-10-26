@@ -11,7 +11,7 @@ on:
         required: false
         default: ""
       region:
-        description: "분석할 지역. auto면 이번 주 로테이션 지역을 자동 선택"
+        description: "분석할 지역. auto면 이번 주 로테이션 지역 (지역 코드 이상이면 로테이션 다음 지역으로 자동 대체)"
         type: choice
         required: false
         default: auto
@@ -91,6 +91,7 @@ jobs:
               echo "slug=$(echo "$META_JSON" | jq -r .slug)"
               echo "path=$(echo "$META_JSON" | jq -r .path)"
               echo "data_period=$(echo "$META_JSON" | jq -r .data_period)"
+              echo "region_note=$(echo "$META_JSON" | jq -r '.region_note // ""')"
             } >> "$GITHUB_OUTPUT"
           elif [ "$EXIT_CODE" = "0" ]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
@@ -124,6 +125,8 @@ jobs:
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           git checkout -b "$BRANCH"
           git add "$POST_PATH"
+          # 건강 점검이 확실한 새 코드를 자동 반영했으면 regions.json도 같은 PR로 올려 검수받는다.
+          git add pipeline/regions.json
           git commit -m "글 자동 생성: $TITLE"
           git push origin "$BRANCH"
 
@@ -133,6 +136,7 @@ jobs:
           TITLE: ${{ steps.meta.outputs.title }}
           SUMMARY: ${{ steps.meta.outputs.summary }}
           DATA_PERIOD: ${{ steps.meta.outputs.data_period }}
+          REGION_NOTE: ${{ steps.meta.outputs.region_note }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           {
@@ -141,6 +145,12 @@ jobs:
             echo "- **제목**: $TITLE"
             echo "- **요약**: $SUMMARY"
             echo "- **사용한 데이터 기간**: $DATA_PERIOD"
+            if [ -n "$REGION_NOTE" ]; then
+              echo "- **지역 대체**: $REGION_NOTE (지역 코드 건강 점검 Issue 참고)"
+            fi
+            if ! git diff --quiet origin/main -- pipeline/regions.json 2>/dev/null; then
+              echo "- **regions.json 변경 포함**: 건강 점검이 1:1로 확실한 새 지역 코드를 자동 반영했습니다. 코드와 표기(label)를 확인해주세요."
+            fi
             echo "- **생성 실행**: $RUN_URL"
             echo
             echo "공공데이터포털 국토교통부 실거래가 API 데이터를 파이썬으로 분석해 자동 생성했습니다."
@@ -175,6 +185,24 @@ jobs:
           for num in $(gh issue list --label auto-post-missed --state open --json number -q '.[].number'); do
             gh issue close "$num" --comment "이후 실행에서 글이 정상 생성되어 닫습니다 (브랜치: \`$BRANCH\`)."
           done
+
+      - name: 지역 코드 이상을 Issue로 알림
+        # 글 생성 여부와 별개로, 건강 점검에서 코드 이상(모든 코드 0건/폐지 코드)이 나온 날은 따로 알린다.
+        if: always() && hashFiles('region_health_report.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          KST_DATE="$(date -u -d '+9 hours' +%F)"
+          { cat region_health_report.md; echo; echo "- 실행 로그: ${RUN_URL}"; } > region_issue.md
+          gh label create region-code-alert --color FBCA04 --description "지역 코드(LAWD_CD) 이상 감지" 2>/dev/null || true
+          # 같은 문제로 이미 열린 Issue가 있으면 새로 만들지 않고 댓글로 이어 붙인다.
+          EXISTING="$(gh issue list --label region-code-alert --state open --json number -q '.[0].number')"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file region_issue.md
+          else
+            gh issue create --title "[지역 코드 이상] ${KST_DATE} 건강 점검" --body-file region_issue.md --label region-code-alert               || gh issue create --title "[지역 코드 이상] ${KST_DATE} 건강 점검" --body-file region_issue.md
+          fi
 
       - name: 글이 생성되지 않은 사유를 Issue로 알림
         if: always() && (steps.meta.outputs.found != 'true' || failure())

@@ -2,7 +2,10 @@
 
 주 3회(월/수/금) 실행을 상정하며, 아래 순서로 동작한다:
   0. 이번 주(월요일 기준)에 다룰 지역을 REGION_ROTATION 순서대로 고름 (--region으로 강제 지정 가능)
-  1. 이번 달/전월(또는 전년 동월) 실거래 데이터를 필요한 만큼 수집 (apt_rent API)
+  1. 이번 달/전월 실거래 데이터를 수집하면서 지역 코드 건강 점검 (모든 코드 0건이거나 폐지된
+     코드가 있으면 "코드 이상" → 확실한 새 코드면 regions.json에 반영, 아니면 로테이션 다음
+     지역으로 대체하고 region_health_report.md를 남겨 CI가 Issue로 알림)
+     전년 동월 등 행정구역 개편 이전 달은 regions.json의 code_history 매핑으로 옛 코드를 조회
   2. 후보 주제(전세/월세/전환율/평형대/전년비교/거래량-가격)를 최근 발행 이력 기준으로
      "오래 쓰이지 않은 주제부터" 순서를 바꿔가며 시도
   3. 거래건수가 너무 적거나(MIN_TRANSACTIONS) 본문이 너무 짧으면(MIN_BODY_CHARS)
@@ -12,6 +15,7 @@
   6. 공공데이터 API 호출이 끝내 실패하면 종료 코드 3으로 끝냄 (CI가 잠시 후 전체 재시도)
 
 종료 코드: 0 = 글 생성 또는 "발행할 주제 없음", 1 = 설정/코드 오류, 3 = 공공데이터 API 오류
+          (모든 지역이 코드 이상이면 0으로 끝내고 "발행할 주제 없음"과 같은 경로로 Issue를 남긴다)
 
 사용 예:
     python generate_post.py                 # 지난달 데이터, 실제 API, 이번 주 로테이션 지역 자동 선택
@@ -49,14 +53,18 @@ from config import (  # noqa: E402
     REGION_ROTATION,
     REGIONS,
 )
-from src import analyze, books, chart, molit_api  # noqa: E402
+from src import analyze, books, chart, lawd_codes, molit_api  # noqa: E402
+from src import regions as region_cfg  # noqa: E402
 from src.molit_api import ApiKey  # noqa: E402
+from src.regions import MappingUncertain  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 BOOKS_FILE = PIPELINE_DIR / "books.json"
 CONTENT_POSTS_DIR = PROJECT_ROOT / "content" / "posts"
 DATA_SOURCE_URL = "https://www.data.go.kr/data/15126474/openapi.do"
 DATASET_KEY = "apt_rent"  # 모든 후보 주제가 같은 API(apt_rent)에서 필터/가공만 다르게 쓴다.
+# 지역 코드 이상을 발견했을 때 CI(generate-post.yml)가 Issue 본문으로 쓰는 파일.
+HEALTH_REPORT_FILE = PROJECT_ROOT / "region_health_report.md"
 
 # 로테이션 시작점(월요일). 이 날짜로부터 몇 주가 지났는지로 이번 주 지역을 정하기 때문에,
 # 이 값 자체가 바뀌어도(과거로 옮겨도) 로테이션 "순서"는 바뀌지 않고 위상만 바뀐다.
@@ -68,7 +76,7 @@ ROTATION_EPOCH = datetime(2024, 1, 8, tzinfo=ZoneInfo("Asia/Seoul"))
 
 def active_region_rotation() -> list[str]:
     """districts가 아직 채워지지 않은(TODO) 지역은 로테이션에서 제외한다."""
-    active = [key for key in REGION_ROTATION if REGIONS[key]["districts"]]
+    active = [key for key in REGION_ROTATION if REGIONS[key].get("districts")]
     if not active:
         raise RuntimeError("REGIONS에 districts가 채워진 지역이 하나도 없습니다.")
     return active
@@ -84,6 +92,15 @@ def pick_region_for_week(today: datetime | None = None) -> str:
     weeks_elapsed = (today.date() - ROTATION_EPOCH.date()).days // 7
     rotation = active_region_rotation()
     return rotation[weeks_elapsed % len(rotation)]
+
+
+def fallback_order(first: str) -> list[str]:
+    """first부터 시작해 로테이션 순서대로 돈다 (코드 이상 지역을 건너뛸 때의 대체 순서)."""
+    rotation = active_region_rotation()
+    if first not in rotation:
+        return [first] + rotation
+    i = rotation.index(first)
+    return rotation[i:] + rotation[:i]
 
 # id는 발행된 글의 slug(seoul-apt-{id}-{yyyymm})에 그대로 쓰이므로 영소문자만 사용한다.
 TOPICS = [
@@ -406,12 +423,22 @@ def make_mock_rows(deal_ymd: str, districts: list[str]) -> list[dict]:
 
 
 def fetch_month_rows(
-    operation: str, deal_ymd: str, api_key: ApiKey, mock: bool, districts: dict
-) -> list[dict]:
+    operation: str, deal_ymd: str, api_key: ApiKey, mock: bool, region: dict
+) -> tuple[list[dict], dict[str, int], list[str]]:
+    """한 달치 행, 코드별 건수, 조회 방식 메모를 돌려준다.
+
+    행정구역 개편 이전 달이면 regions.json의 매핑대로 옛 코드로 조회해 새 시/군/구 이름으로 담는다.
+    매핑이 불확실하면 MappingUncertain이 그대로 올라가 호출부(주제)에서 건너뛴다.
+    """
+    plan = region_cfg.fetch_plan(region, deal_ymd)
     if mock:
-        return make_mock_rows(deal_ymd, list(districts.keys()))
-    raw_rows = molit_api.fetch_region_month(operation, districts, deal_ymd, api_key)
-    return [molit_api.normalize_rent_row(row) for row in raw_rows]
+        rows = make_mock_rows(deal_ymd, [d["name"] for d in region["districts"]])
+        counts = {d["lawd_cd"]: sum(1 for r in rows if r["구명"] == d["name"]) for d in region["districts"]}
+        return rows, counts, plan.notes
+    raw_rows, counts = molit_api.fetch_region_month_with_counts(
+        operation, plan.direct, deal_ymd, api_key, remap=plan.remap, assign=region_cfg.assign_district
+    )
+    return [molit_api.normalize_rent_row(row) for row in raw_rows], counts, plan.notes
 
 
 # 그룹별 증감을 표/인사이트에 쓸 때, 두 달 중 한쪽이라도 거래가 이보다 적으면
@@ -593,6 +620,7 @@ def try_topic(
     reference_df_all,
     deal_ymd: str,
     reference_ymd: str,
+    fetch_notes: list[str] | None = None,
 ) -> dict:
     """주제 하나를 시도한다. 데이터 부족/본문 부족이면 TopicSkipped를 던진다.
 
@@ -659,6 +687,9 @@ def try_topic(
         )
 
     # ---- 여기부터 표/차트/본문 생성. 이 구간에서 나는 예외는 '기술적 실패'로 취급한다. ----
+    if fetch_notes:  # 비교 기준월이 행정구역 개편 이전 달이면 어떻게 조회했는지 밝힌다.
+        notes = ([topic["method_note"]] if topic.get("method_note") else []) + fetch_notes
+        topic = {**topic, "method_note": "\n- ".join(notes)}
     body = build_body(
         title=title,
         topic=topic,
@@ -838,6 +869,128 @@ def try_volumeprice_topic(
 EXIT_API_ERROR = 3  # CI(generate-post.yml)가 이 코드일 때만 잠시 기다렸다가 다시 시도한다.
 
 
+def probe_past_months_query(region: dict, applied: list[dict], probe_ymd: str, api_key: ApiKey, dataset: dict) -> None:
+    """자동 반영한 개편에 대해, 개편 이전 달(probe_ymd)을 API가 어느 코드로 주는지 실제 호출로 확인한다.
+
+    새 코드로 건수가 나오면 new_codes, 옛 코드로만 나오면 old_codes. 둘 다 0건이면 값을 남기지 않아
+    그 달과 비교하는 주제(전년 동월 등)는 건너뛰게 된다.
+    """
+    for change in region.get("code_history", []):
+        if change.get("past_months_query") or not any(
+            m["new_lawd_cd"] in {c["new_lawd_cd"] for c in applied} for m in change["mapping"]
+        ):
+            continue
+        if probe_ymd >= change["effective_date"].replace("-", "")[:6]:
+            continue
+        new_total = sum(molit_api.count_district_month(dataset["operation"], m["new_lawd_cd"], probe_ymd, api_key)[0]
+                        for m in change["mapping"])
+        old_total = sum(molit_api.count_district_month(dataset["operation"], m["old_lawd_cd"], probe_ymd, api_key)[0]
+                        for m in change["mapping"])
+        change["api_verified_on"] = datetime.now(KST).strftime("%Y-%m-%d")
+        change["evidence"].append(f"{probe_ymd} 호출: 새 코드 합계 {new_total:,}건, 옛 코드 합계 {old_total:,}건")
+        if new_total > 0 and old_total == 0:
+            change["past_months_query"] = "new_codes"
+        elif old_total > 0 and new_total == 0:
+            change["past_months_query"] = "old_codes"
+        print(f"  개편 이전 달({probe_ymd}) 조회 방식: {change.get('past_months_query', '미확인 — 비교 주제 건너뜀')}")
+
+
+def check_region(
+    region_key: str, deal_ymd: str, prev_ymd: str, api_key: ApiKey, mock: bool, dataset: dict, save: bool = True
+) -> tuple[region_cfg.HealthReport, dict]:
+    """지역 코드 건강 점검. 최근 2개월(분석월·전월) 조회 결과를 코드별로 세어 판정한다.
+
+    두 달 모두 어차피 글에 필요한 데이터라 점검만을 위해 API를 더 부르지 않는다
+    (0건 코드는 호출 1번으로 끝나서 가볍다). 받은 데이터는 frames로 돌려줘 재사용한다.
+    이상이면 법정동코드 자료로 새 코드 후보를 찾고, 확실한 후보만 반영해 한 번 더 점검한다.
+    """
+    region = REGIONS[region_key]
+    frames: dict = {}
+    counts: dict[str, dict[str, int]] = {}
+    for ymd in (deal_ymd, prev_ymd):
+        print(f"  ({ymd} {region['label']} {dataset['label']} 데이터 수집 중...)")
+        rows, by_code, notes = fetch_month_rows(dataset["operation"], ymd, api_key, mock, region)
+        frames[ymd] = (analyze.to_dataframe(rows), notes)
+        for code, n in by_code.items():
+            counts.setdefault(code, {})[ymd] = n
+    report = region_cfg.evaluate_health(region_key, region, [deal_ymd, prev_ymd], counts)
+    print(f"  건강 점검: {report.summary_line()}")
+    if report.healthy:
+        return report, frames
+
+    try:
+        report.candidates = region_cfg.find_candidates(report, region)
+    except lawd_codes.LawdCodeError as exc:
+        report.lookup_error = str(exc)
+        return report, frames
+    for cand in report.candidates:
+        print(f"  후보: {cand['old_lawd_cd']} → {cand.get('new_lawd_cd') or '없음'} ({'확실' if cand['certain'] else '불확실'})")
+    backup = json.loads(json.dumps(region))
+    applied = region_cfg.apply_certain_candidates(region, report.candidates)
+    if not applied:
+        return report, frames
+
+    # 확실한 후보(1:1, 법정동 구성 동일)만 반영됐다. 새 코드로 실제 데이터가 들어오는지 다시 확인한다.
+    print("  새 코드 자동 반영 후 재점검: " + ", ".join(f"{c['old_lawd_cd']}→{c['new_lawd_cd']}" for c in applied))
+    retry_frames: dict = {}
+    retry_counts: dict[str, dict[str, int]] = {}
+    for ymd in (deal_ymd, prev_ymd):
+        rows, by_code, notes = fetch_month_rows(dataset["operation"], ymd, api_key, mock, region)
+        retry_frames[ymd] = (analyze.to_dataframe(rows), notes)
+        for code, n in by_code.items():
+            retry_counts.setdefault(code, {})[ymd] = n
+    retry = region_cfg.evaluate_health(region_key, region, [deal_ymd, prev_ymd], retry_counts)
+    retry.candidates = report.candidates
+    if not retry.healthy:
+        REGIONS[region_key] = backup  # 새 코드로도 데이터가 없으면 반영을 되돌린다.
+        report.candidates.append({"old_lawd_cd": "-", "old_name": "", "certain": False,
+                                  "evidence": ["확실한 후보를 반영했지만 새 코드로도 데이터가 없어 되돌림"]})
+        return report, frames
+    region["codes_verified_on"] = datetime.now(KST).strftime("%Y-%m-%d")
+    if not mock:
+        probe_past_months_query(region, applied, month_year_before(deal_ymd), api_key, dataset)
+    retry.auto_applied = applied
+    if save:
+        save_regions_file()
+    print(f"  재점검: {retry.summary_line()}" + (" (regions.json 갱신)" if save else " (점검 전용: regions.json은 그대로)"))
+    return retry, retry_frames
+
+
+def save_regions_file() -> None:
+    """메모리의 REGIONS 변경(자동 반영된 새 코드)을 regions.json에 쓴다. CI가 글과 함께 PR에 올린다."""
+    cfg = region_cfg.load_config()
+    cfg["regions"] = REGIONS
+    region_cfg.save_config(cfg)
+
+
+def write_health_report(reports: list[region_cfg.HealthReport], chosen: str | None) -> None:
+    """코드 이상이 있었던 지역들의 점검 결과를, CI가 Issue로 올릴 마크다운 파일로 남긴다."""
+    flagged = [r for r in reports if not r.healthy or r.auto_applied]
+    if not flagged:
+        HEALTH_REPORT_FILE.unlink(missing_ok=True)
+        return
+    lines = ["## 지역 코드 건강 점검 결과", ""]
+    for r in reports:
+        applied = " (새 코드 자동 반영 — 글 PR의 regions.json 변경을 확인해주세요)" if r.auto_applied else ""
+        lines.append(f"- {r.summary_line()}{applied}")
+    lines.append("")
+    if chosen:
+        lines.append(f"오늘 글은 **{REGIONS[chosen]['label']}**(`{chosen}`) 데이터로 생성을 시도했습니다.")
+    else:
+        lines.append("대체할 수 있는 정상 지역이 없어 오늘 글을 만들지 못했습니다.")
+    lines += [
+        "",
+        "자동 반영되지 않은 지역은 아래 후보와 근거를 확인한 뒤 `pipeline/regions.json`의 `districts`와 "
+        "`code_history`를 고쳐주세요. 옛/새 코드 응답 확인: "
+        "`python pipeline/diagnose_codes.py --codes <옛코드>,<새코드>`",
+        "",
+    ]
+    for r in flagged:
+        lines += [r.to_markdown(), ""]
+    HEALTH_REPORT_FILE.write_text("\n".join(lines), encoding="utf-8")
+    print(f"::region-alert::{HEALTH_REPORT_FILE.name}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="전국 지역별 아파트 전월세 동향 글 자동 생성")
     parser.add_argument("--month", help="YYYYMM 형식. 생략하면 지난달 사용", default=None)
@@ -847,21 +1000,22 @@ def main() -> None:
         default=None,
         help="분석할 지역 키. 생략하면 이번 주 로테이션(REGION_ROTATION)에서 자동 선택",
     )
+    parser.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="지역 코드 이상이어도 로테이션 다음 지역으로 대체하지 않음 (진단용)",
+    )
+    parser.add_argument(
+        "--health-only",
+        action="store_true",
+        help="글은 만들지 않고 지역 코드 건강 점검 결과만 출력 (--region 생략 시 로테이션 전체, regions.json은 바꾸지 않음)",
+    )
     parser.add_argument("--mock", action="store_true", help="API 키 없이 가짜 데이터로 파이프라인만 검증")
     args = parser.parse_args()
 
     dataset = DATASETS[DATASET_KEY]
     deal_ymd = resolve_month(args.month)
     prev_ymd = month_before(deal_ymd)
-
-    region_key = args.region or pick_region_for_week()
-    region_info = REGIONS[region_key]
-    if not region_info["districts"]:
-        print(f"'{region_key}' 지역은 아직 districts가 채워지지 않았습니다.", file=sys.stderr)
-        sys.exit(1)
-    region_label = region_info["label"]
-    region_group_label = region_info["group_label"]
-    districts = region_info["districts"]
 
     api_key = ApiKey.from_env()
     if not args.mock and not api_key.is_configured():
@@ -872,23 +1026,63 @@ def main() -> None:
         )
         sys.exit(1)
 
-    frames_cache: dict[str, object] = {}
+    if args.health_only:
+        try:
+            for key in [args.region] if args.region else active_region_rotation():
+                print(f"== {key} ({REGIONS[key]['label']}) 건강 점검: {deal_ymd} / {prev_ymd}")
+                report, _ = check_region(key, deal_ymd, prev_ymd, api_key, args.mock, dataset, save=False)
+                print(report.to_markdown() + "\n")
+        except molit_api.MolitApiError as exc:
+            print(f"공공데이터 API 오류: {exc}", file=sys.stderr)
+            sys.exit(EXIT_API_ERROR)
+        return
 
-    def get_df_all(ymd: str):
-        if ymd not in frames_cache:
-            print(f"  ({ymd} {region_label} {dataset['label']} 데이터 수집 중...)")
-            rows = fetch_month_rows(dataset["operation"], ymd, api_key, args.mock, districts)
-            frames_cache[ymd] = analyze.to_dataframe(rows)
-        return frames_cache[ymd]
+    first_region = args.region or pick_region_for_week()
+    if not REGIONS[first_region].get("districts"):
+        print(f"'{first_region}' 지역은 아직 districts가 채워지지 않았습니다.", file=sys.stderr)
+        sys.exit(1)
+    region_order = [first_region] if args.no_fallback else fallback_order(first_region)
 
-    print(f"[1/4] {deal_ymd} / {prev_ymd} {region_label} {dataset['label']} 데이터 수집 중...")
+    # 대부분의 후보 주제가 전월 데이터를 필요로 하므로, 분석월·전월 조회가 곧 건강 점검이다.
+    print(f"[1/4] {deal_ymd} / {prev_ymd} {dataset['label']} 데이터 수집 + 지역 코드 건강 점검")
+    reports: list[region_cfg.HealthReport] = []
+    region_key: str | None = None
+    frames_cache: dict[str, tuple] = {}
     try:
-        this_df_all = get_df_all(deal_ymd)
-        prev_df_all = get_df_all(prev_ymd)  # 대부분의 후보 주제가 전월 데이터를 필요로 함
+        for key in region_order:
+            report, frames = check_region(key, deal_ymd, prev_ymd, api_key, args.mock, dataset)
+            reports.append(report)
+            if report.healthy:
+                region_key, frames_cache = key, frames
+                break
+            print(f"  → {REGIONS[key]['label']}은(는) 오늘 건너뛰고 로테이션 다음 지역을 시도합니다.")
     except molit_api.MolitApiError as exc:
         print(f"공공데이터 API 오류로 데이터를 수집하지 못했습니다: {exc}", file=sys.stderr)
         sys.exit(EXIT_API_ERROR)
-    print(f"[2/4] 데이터 정제 완료 (이번달 {len(this_df_all)}건, 전월 {len(prev_df_all)}건)")
+    write_health_report(reports, region_key)
+
+    if region_key is None:
+        print("오늘은 발행할 만한 주제가 없습니다 (모든 지역이 지역 코드 이상):")
+        for r in reports:
+            print(f"  - {r.summary_line()}")
+        sys.exit(0)
+
+    region_info = REGIONS[region_key]
+    region_label = region_info["label"]
+    region_group_label = region_info["group_label"]
+    if region_key != first_region:
+        print(f"  대체 지역: {REGIONS[first_region]['label']} → {region_label}")
+
+    def get_frame(ymd: str):
+        """(DataFrame, 조회 방식 메모). 개편 이전 달의 매핑이 불확실하면 MappingUncertain."""
+        if ymd not in frames_cache:
+            print(f"  ({ymd} {region_label} {dataset['label']} 데이터 수집 중...)")
+            rows, _, notes = fetch_month_rows(dataset["operation"], ymd, api_key, args.mock, region_info)
+            frames_cache[ymd] = (analyze.to_dataframe(rows), notes)
+        return frames_cache[ymd]
+
+    this_df_all, prev_df_all = get_frame(deal_ymd)[0], get_frame(prev_ymd)[0]
+    print(f"[2/4] 데이터 정제 완료 ({region_label}: 이번달 {len(this_df_all)}건, 전월 {len(prev_df_all)}건)")
 
     ordered_topics = order_topics_by_recency(CANDIDATE_TOPICS)
     print(f"[3/4] 후보 주제 시도 순서: {[t['id'] for t in ordered_topics]}")
@@ -906,12 +1100,16 @@ def main() -> None:
                 else:
                     reference_ymd = prev_ymd
                 try:
-                    reference_df_all = get_df_all(reference_ymd)
+                    reference_df_all, ref_notes = get_frame(reference_ymd)
                 except molit_api.MolitApiError as exc:
                     print(f"공공데이터 API 오류로 데이터를 수집하지 못했습니다: {exc}", file=sys.stderr)
                     sys.exit(EXIT_API_ERROR)
+                except MappingUncertain as exc:
+                    # 근거 없이 옛 데이터와 비교하지 않는다: 이 주제만 건너뛰고 다음 후보로.
+                    raise TopicSkipped(f"[{topic['id']}] 비교 기준월 옛 코드 매핑 불확실: {exc}") from exc
                 result = try_topic(
-                    topic, region_key, region_label, region_group_label, this_df_all, reference_df_all, deal_ymd, reference_ymd
+                    topic, region_key, region_label, region_group_label, this_df_all, reference_df_all,
+                    deal_ymd, reference_ymd, fetch_notes=ref_notes,
                 )
         except TopicSkipped as exc:
             print(f"  건너뜀: {exc}")
@@ -919,6 +1117,8 @@ def main() -> None:
             continue
 
         print(f"[4/4] 완료: {result['path']}/index.md")
+        if region_key != first_region:
+            result["region_note"] = f"{REGIONS[first_region]['label']} 지역 코드 이상으로 {region_label}(으)로 대체"
         print("::post-meta::" + json.dumps(result, ensure_ascii=False))
         return
 
