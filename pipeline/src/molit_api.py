@@ -163,6 +163,27 @@ def fetch_district_month(
     return all_items
 
 
+def count_district_month(
+    operation: str,
+    lawd_cd: str,
+    deal_ymd: str,
+    api_key: ApiKey,
+    timeout: Tuple[int, int] = (10, 30),
+) -> Tuple[int, Dict[str, str] | None]:
+    """한 페이지에 1건만 받아 totalCount(전체 건수)와 샘플 1건만 돌려준다.
+
+    지역 코드 건강 점검처럼 "데이터가 들어오는지"만 확인할 때 쓰는 가벼운 호출이다.
+    샘플의 sggCd/umdNm 필드로 API가 그 거래를 어느 코드로 분류하고 있는지도 볼 수 있다.
+    """
+    if not api_key.is_configured():
+        raise MolitApiError("공공데이터포털 서비스키가 설정되지 않았습니다.")
+    url = f"{MOLIT_BASE_URL}/{operation}"
+    params = {"LAWD_CD": lawd_cd, "DEAL_YMD": deal_ymd, "numOfRows": "1", "pageNo": "1"}
+    resp = _request_page(url, params, api_key, timeout, max_retries=3)
+    items, total_count = _parse_response(resp.text)
+    return total_count, (items[0] if items else None)
+
+
 def fetch_region_month(
     operation: str,
     lawd_codes: Dict[str, str],

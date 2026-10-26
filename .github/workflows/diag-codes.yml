@@ -1,0 +1,26 @@
+name: (임시) 지역 코드 API 진단
+on:
+  push:
+    branches: ["fix/region-codes"]
+    paths: [".github/workflows/diag-codes.yml", "pipeline/diagnose_codes.py"]
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r pipeline/requirements.txt
+      - name: 광주 옛 코드(29xxx) vs 새 코드(12xxx)
+        env:
+          DATA_GO_KR_ENCODING_KEY: ${{ secrets.DATA_GO_KR_ENCODING_KEY }}
+          DATA_GO_KR_DECODING_KEY: ${{ secrets.DATA_GO_KR_DECODING_KEY }}
+        run: python pipeline/diagnose_codes.py --codes 29110,29140,29155,29170,29200,12210,12240,12270,12300,12330 --months 202609,202608,202607,202606,202509
+      - name: 인천 옛 코드 vs 개편 코드
+        env:
+          DATA_GO_KR_ENCODING_KEY: ${{ secrets.DATA_GO_KR_ENCODING_KEY }}
+          DATA_GO_KR_DECODING_KEY: ${{ secrets.DATA_GO_KR_DECODING_KEY }}
+        run: python pipeline/diagnose_codes.py --codes 28110,28140,28260,28125,28155,28275,28290,28177,28185,28200,28237,28245,28710,28720 --months 202609,202608,202607,202606,202509
