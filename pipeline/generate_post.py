@@ -520,10 +520,12 @@ def group_change_insight(
     top, bottom = comparable.loc[change.idxmax()], comparable.loc[change.idxmin()]
     top_desc = "가장 많이 오른" if change.max() > 0 else "가장 적게 내린"
     bottom_desc = "가장 많이 내린" if change.min() < 0 else "가장 적게 오른"
+    eun = analyze.josa_eun_neun(group_noun)
+    bottom_change = format_change(bottom[mean_col], bottom["기준 평균"], unit_name)
     return (
-        f"{compare_label} 대비 평균이 {top_desc} {group_noun}은 {top[group_col]}"
-        f"({format_change(top[mean_col], top['기준 평균'], unit_name)}), {bottom_desc} {group_noun}은 "
-        f"{bottom[group_col]}({format_change(bottom[mean_col], bottom['기준 평균'], unit_name)})이었습니다 "
+        f"{compare_label} 대비 평균이 {top_desc} {group_noun}{eun} {top[group_col]}"
+        f"({format_change(top[mean_col], top['기준 평균'], unit_name)}), {bottom_desc} {group_noun}{eun} "
+        f"{bottom[group_col]}({bottom_change}){analyze.josa_ieot(bottom_change)}습니다 "
         f"(두 달 모두 {MIN_GROUP_COMPARE_COUNT}건 이상 거래된 {group_noun}만 비교)."
     )
 
@@ -820,7 +822,11 @@ def try_volumeprice_topic(
             if corr > 0
             else "반비례(거래가 많을수록 가격이 더 내렸음)"
         )
-        corr_desc = f"거래건수와 가격 변동률의 상관계수는 {corr:.2f}로, {strength} {direction} 관계를 보였습니다."
+        corr_text = f"{corr:.2f}"
+        corr_desc = (
+            f"거래건수와 가격 변동률의 상관계수는 {corr_text}{analyze.josa_euro(corr_text)}, "
+            f"{strength} {direction} 관계를 보였습니다."
+        )
 
     group_count_desc = f"{len(vp_df)}개 {region_group_label}"  # 표에 실린(두 달 모두 거래가 있는) 곳만 센다
     insights = [
@@ -828,9 +834,10 @@ def try_volumeprice_topic(
         f"{most_traded['구명']}({int(most_traded['거래건수'])}건)이었습니다.",
         f"전월 대비 평균 전세보증금이 가장 많이 오른 곳은 {biggest_gain['구명']}"
         f"({biggest_gain['가격변동률']:+.1f}%), 가장 많이 내린 곳은 {biggest_drop['구명']}"
-        f"({biggest_drop['가격변동률']:+.1f}%)이었습니다.",
+        f"({biggest_drop['가격변동률']:+.1f}%)였습니다.",
         corr_desc,
-        f"상관관계는 인과관계를 의미하지 않으며, 표본 수가 적은 {region_group_label}은 결과가 왜곡될 수 있습니다.",
+        f"상관관계는 인과관계를 의미하지 않으며, 표본 수가 적은 {region_group_label}"
+        f"{analyze.josa_eun_neun(region_group_label)} 결과가 왜곡될 수 있습니다.",
     ]
 
     table_lines = [f"| {region_group_label} | 거래건수 | 가격변동률(전월 대비) |", "|---|---:|---:|"]

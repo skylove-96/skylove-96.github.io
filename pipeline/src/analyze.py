@@ -6,14 +6,42 @@ from typing import Any, Dict, List, Tuple
 import pandas as pd
 
 
-def _has_batchim(word: str) -> bool:
-    """단어 마지막 글자에 받침이 있는지 (조사 은/는, 이/가 선택용)."""
-    if not word:
-        return False
-    code = ord(word[-1])
+# 숫자·기호는 읽는 소리로 받침을 판단한다: 3.5% = "삼점오퍼센트"(받침 없음), +0.30 = "영점삼영"(받침 ㅇ).
+# 값은 (받침 있음, ㄹ 받침) — "으로/로"는 ㄹ 받침이면 "로"를 쓴다 (예: 1로, 서울로).
+_DIGIT_SOUND = {
+    "0": (True, False), "1": (True, True), "2": (False, False), "3": (True, False), "4": (False, False),
+    "5": (False, False), "6": (True, False), "7": (True, True), "8": (True, True), "9": (False, False),
+}
+# 0으로 끝나는 정수는 자릿수 이름으로 읽는다: 10 십(ㅂ), 100 백(ㄱ), 1000 천(ㄴ), 10000 만(ㄴ).
+_TRAILING_ZERO_SOUND = {1: (True, False), 2: (True, False), 3: (True, False), 4: (True, False)}
+_SYMBOL_SOUND = {"%": (False, False), "p": (False, False), "㎡": (False, False)}  # 퍼센트, (퍼센트)포인트, 제곱미터
+
+
+def _final_sound(word: str) -> tuple[bool, bool]:
+    """(받침 있음, ㄹ 받침). 뒤쪽 공백·닫는 괄호는 건너뛴다 (예: "남구(+8.3%)" → "%")."""
+    text = str(word).rstrip(" )]")
+    if not text:
+        return False, False
+    last = text[-1]
+    code = ord(last)
     if 0xAC00 <= code <= 0xD7A3:
-        return (code - 0xAC00) % 28 != 0
-    return False
+        jong = (code - 0xAC00) % 28
+        return jong != 0, jong == 8  # 8 = ㄹ
+    if last in _SYMBOL_SOUND:
+        return _SYMBOL_SOUND[last]
+    if last.isdigit():
+        digits = text.rstrip("0")
+        zeros = len(text) - len(digits)
+        is_integer_tail = zeros and "." not in text[-(zeros + 1):] and not digits.endswith(".")
+        if is_integer_tail and zeros in _TRAILING_ZERO_SOUND:
+            return _TRAILING_ZERO_SOUND[zeros]
+        return _DIGIT_SOUND[last]
+    return False, False
+
+
+def _has_batchim(word: str) -> bool:
+    """단어 마지막 소리에 받침이 있는지 (조사 은/는, 이/가 등 선택용)."""
+    return _final_sound(word)[0]
 
 
 def josa_eun_neun(word: str) -> str:
@@ -22,6 +50,17 @@ def josa_eun_neun(word: str) -> str:
 
 def josa_i_ga(word: str) -> str:
     return "이" if _has_batchim(word) else "가"
+
+
+def josa_euro(word: str) -> str:
+    """으로/로 (예: 2.4억원으로, 3.5%로, 1로)."""
+    batchim, rieul = _final_sound(word)
+    return "으로" if batchim and not rieul else "로"
+
+
+def josa_ieot(word: str) -> str:
+    """이었/였 — 뒤에 '고', '습니다'를 붙여 쓴다 (예: 남구(약 2.8억원)이었고, 서구(-6.2%)였습니다)."""
+    return "이었" if _has_batchim(word) else "였"
 
 
 def to_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
@@ -214,18 +253,21 @@ def build_insights(
 
     this_avg, change_pct = month_over_month(this_month_df, prev_month_df, value_col)
     direction = "상승" if change_pct > 0 else ("하락" if change_pct < 0 else "보합")
+    avg_text = f"{this_avg / unit_divisor:.1f}{unit_name}"
     insights.append(
         f"{month_label} {region_label} 아파트 {deal_desc} 평균 {out_prefix}{josa_eun_neun(out_prefix)} "
-        f"약 {this_avg / unit_divisor:.1f}{unit_name}으로, {compare_label} 대비 {abs(change_pct):.1f}% {direction}했습니다."
+        f"약 {avg_text}{josa_euro(avg_text)}, {compare_label} 대비 {abs(change_pct):.1f}% {direction}했습니다."
     )
 
     if not group_summary.empty:
         top = group_summary.iloc[0]
         bottom = group_summary.iloc[-1]
+        ieot = josa_ieot(unit_name)
         insights.append(
-            f"{group_count_desc} 중 평균 {out_prefix}{josa_i_ga(out_prefix)} 가장 높은 {group_noun}은 {top[group_col]}"
-            f"(약 {top[mean_col] / unit_divisor:.1f}{unit_name})이었고, "
-            f"가장 낮은 {group_noun}은 {bottom[group_col]}(약 {bottom[mean_col] / unit_divisor:.1f}{unit_name})이었습니다."
+            f"{group_count_desc} 중 평균 {out_prefix}{josa_i_ga(out_prefix)} 가장 높은 {group_noun}{josa_eun_neun(group_noun)} "
+            f"{top[group_col]}(약 {top[mean_col] / unit_divisor:.1f}{unit_name}){ieot}고, "
+            f"가장 낮은 {group_noun}{josa_eun_neun(group_noun)} {bottom[group_col]}"
+            f"(약 {bottom[mean_col] / unit_divisor:.1f}{unit_name}){ieot}습니다."
         )
 
         most_traded = group_summary.sort_values("거래건수", ascending=False).iloc[0]
