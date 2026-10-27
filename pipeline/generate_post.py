@@ -656,12 +656,13 @@ def try_topic(
     """
     group_col = topic.get("group_col", "구명")
     group_header = topic.get("group_header", group_col if group_col != "구명" else region_group_label)
-    group_count_desc = topic.get("group_count_desc", f"{len(REGIONS[region_key]['districts'])}개 {region_group_label}")
     group_noun = topic.get("group_noun", "곳")
     compare_label = topic.get("compare_label", "전월")
 
     this_df = topic["filter_fn"](this_df_all)
     reference_df = topic["filter_fn"](reference_df_all)
+    # 설정된 구/군 수가 아니라 이번 달 실제 거래가 있는 곳만 센다 (예: 인천 옹진군은 아파트 전월세 신고가 거의 없음).
+    group_count_desc = topic.get("group_count_desc", f"{this_df[group_col].nunique()}개 {region_group_label}")
 
     if len(this_df) < MIN_TRANSACTIONS:
         raise TopicSkipped(
@@ -821,7 +822,7 @@ def try_volumeprice_topic(
         )
         corr_desc = f"거래건수와 가격 변동률의 상관계수는 {corr:.2f}로, {strength} {direction} 관계를 보였습니다."
 
-    group_count_desc = f"{len(REGIONS[region_key]['districts'])}개 {region_group_label}"
+    group_count_desc = f"{len(vp_df)}개 {region_group_label}"  # 표에 실린(두 달 모두 거래가 있는) 곳만 센다
     insights = [
         f"{month_label} {region_label} {group_count_desc} 중 순수 전세 거래가 가장 활발한 곳은 "
         f"{most_traded['구명']}({int(most_traded['거래건수'])}건)이었습니다.",
