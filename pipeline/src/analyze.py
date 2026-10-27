@@ -252,11 +252,19 @@ def build_insights(
         return insights
 
     this_avg, change_pct = month_over_month(this_month_df, prev_month_df, value_col)
-    direction = "상승" if change_pct > 0 else ("하락" if change_pct < 0 else "보합")
+    if unit_name == "%":
+        # 비율 지표(전환율 등)는 증감률의 증감률이 되지 않도록 표와 같이 %p 차이로 쓴다.
+        prev_avg = prev_month_df[value_col].mean() if not prev_month_df.empty else this_avg
+        change_value = (this_avg - prev_avg) / unit_divisor
+        change_text = f"{abs(change_value):.2f}%p"
+    else:
+        change_value = change_pct
+        change_text = f"{abs(change_pct):.1f}%"
+    direction = "상승" if change_value > 0 else ("하락" if change_value < 0 else "보합")
     avg_text = f"{this_avg / unit_divisor:.1f}{unit_name}"
     insights.append(
         f"{month_label} {region_label} 아파트 {deal_desc} 평균 {out_prefix}{josa_eun_neun(out_prefix)} "
-        f"약 {avg_text}{josa_euro(avg_text)}, {compare_label} 대비 {abs(change_pct):.1f}% {direction}했습니다."
+        f"약 {avg_text}{josa_euro(avg_text)}, {compare_label} 대비 {change_text} {direction}했습니다."
     )
 
     if not group_summary.empty:
